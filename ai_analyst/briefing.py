@@ -171,6 +171,9 @@ def build_prompt(binance, mf, ib, etf, cme, vp, session):
     ls  = binance.get("ls_ratio", {})
     ext = binance.get("spot", {})
 
+    # ── [新增] Binance 5分钟粒度市场结构数据（OI趋势/费率/多空比/象限）
+    market_ctx = binance.get("market_ctx", "")
+
     price     = p.get("price", 0)
     chg       = p.get("change_pct", 0)
     fr        = f.get("rate", 0)
@@ -183,6 +186,12 @@ def build_prompt(binance, mf, ib, etf, cme, vp, session):
     ts        = binance.get("timestamp", "")
 
     TIME_RULE = "时间统一使用北京时间/SGT表述，不要出现UTC"
+
+    # ── [新增] 市场结构块（仅当数据存在时追加）
+    market_ctx_block = f"""
+=== Binance 市场结构（5分钟粒度实时数据，比上方OI/多空比更精细）===
+{market_ctx}
+""" if market_ctx else ""
 
     DATA = f"""
 === 价格数据 ===
@@ -208,7 +217,7 @@ OI信号：{_oi_signal(oi_chg, chg)}
 === 多空比 ===
 大户：{ls.get("top_long_pct",50):.1f}%多 / {ls.get("top_short_pct",50):.1f}%空
 全账户：{ls.get("global_long_pct",50):.1f}%多 / {ls.get("global_short_pct",50):.1f}%空
-
+{market_ctx_block}
 === Coinbase 溢价 ===
 ${ext.get("cb_price",0):,.0f}  溢价：{cb_prem:+.0f} USD  {cb_sig}
 （正值=美国机构买入溢价；负值=美国机构抛售折价）
@@ -295,8 +304,9 @@ ${ext.get("cb_price",0):,.0f}  溢价：{cb_prem:+.0f} USD  {cb_sig}
 
 8.【衍生品深度解读】
    Funding 多交所分析（方向共识/分歧）
-   OI 信号（真实建仓 vs 挤仓）
+   OI 信号（真实建仓 vs 挤仓）+ 结合5分钟粒度OI趋势与市场象限（Q1/Q2/Q3/Q4）综合判断
    CB 溢价的机构行为判断
+   大户多空比分析（结合5分钟粒度数据，是否存在极端拥挤信号）
 
 9.【AMT 市场状态·今日框架】
    平衡市 or 失衡市
@@ -344,10 +354,11 @@ IB 数据：${ib.get("ib_low",0):,.0f}-${ib.get("ib_high",0):,.0f} | 类型：{i
    > 伦敦开盘常在亚盘极值处制造 Stop Hunt
    > 扫完流动性后出现反向信号才是真正入场时机
    当前最有可能被扫的流动性位置
+   结合市场象限（Q1/Q2/Q3/Q4）判断趋势真实性
 
 3.【衍生品实时更新】
    Funding 相比早盘的变化方向和含义
-   OI 变化（一句话）
+   OI 变化（结合5分钟粒度象限数据一句话）
    CB 溢价变化趋势
    若 ETF 数据有更新（数据来源标注"今日首次更新"），在此一并说明
 
@@ -390,8 +401,9 @@ IB 数据：${ib.get("ib_low",0):,.0f}-${ib.get("ib_high",0):,.0f} | 类型：{i
 
 3.【美盘前衍生品状态】
    Funding 全日变化趋势（较早盘变化方向）
-   OI 最终状态
+   OI 最终状态（结合全日象限分布判断趋势性质）
    CB 溢价全天趋势（机构美盘前的态度）
+   大户多空比当前状态（是否出现极端拥挤）
 
 4.【流动性更新·NY Kill Zone Stop Hunt 预警】
    更新后的 BSL/SSL（基于今日形成的摆动高低点）
@@ -422,7 +434,7 @@ IB参考：${ib.get("ib_low",0):,.0f}-${ib.get("ib_high",0):,.0f} | {ib.get("ope
 
 1.【当前市场评级】一句话+字母评级（A/B/C/D）
 2.【价格结构】当前价格相对 IB/PDH/PDL/PDC 的位置与含义
-3.【衍生品快照】Funding+OI+CB溢价各一行，一句话综合判断
+3.【衍生品快照】Funding+OI+CB溢价各一行 + 当前市场象限（Q1/Q2/Q3/Q4）综合判断
 4.【当前最优操作思路】
    做多条件：$XX（触发）止损 $XX 目标 $XX
    做空条件：$XX（触发）止损 $XX 目标 $XX

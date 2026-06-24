@@ -99,6 +99,21 @@ def run(session: str = "ondemand"):
 
         binance["spot"] = extras
 
+        # ── [新增] Binance 市场结构数据（OI趋势/资金费率/大户多空比/市场象限）────
+        # 数据来源：btc_history.db 的 binance_* 表，由 btc-binance-data 服务后台采集
+        # try/except 保证：即使本模块失败，简报主流程完全不受影响
+        try:
+            from briefing.binance_briefing_data import get_binance_context
+            binance["market_ctx"] = get_binance_context()
+            if binance["market_ctx"]:
+                logger.info("      Binance 市场结构数据已载入（OI/费率/多空比/象限）")
+            else:
+                logger.warning("      Binance 市场结构数据为空（btc-binance-data 可能未运行）")
+        except Exception as _e:
+            logger.warning(f"      Binance 市场结构数据跳过: {_e}")
+            binance["market_ctx"] = ""
+        # ────────────────────────────────────────────────────────────────────────
+
         logger.info(f"[6/7] Claude AI 分析中 [{session}]...")
         briefing = generate_briefing(binance, mf, ib, etf, cme, vp, session)
 
