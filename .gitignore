@@ -1,0 +1,9 @@
+.env
+btc_history.db
+*.db
+logs/
+__pycache__/
+*.pyc
+*.log
+venv/
+.env.*

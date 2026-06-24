@@ -1,0 +1,178 @@
+"""
+BTC 实时数据面板 · FastAPI 后端  v2.0
+新增: Coinbase溢价 + OI多时间段变化
+"""
+import asyncio, json, logging, sys
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone, timedelta
+from typing import Set
+
+import aiohttp, websockets
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+
+SGT = timezone(timedelta(hours=8))
+logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-8s  %(message)s", datefmt="%H:%M:%S")
+log = logging.getLogger("btc-api")
+
+S: dict = {
+    "price": 0.0, "change_24h": 0.0, "volume_24h": 0.0,
+    "funding": {},
+    "oi_btc": 0.0,
+    "oi_changes": {},    # {5m:{pct,val}, 15m:{...}, ...}
+    "cb_premium": 0.0,            # Coinbase 溢价 vs 全球现货均价（对齐 CoinGlass）
+            # 公式: Coinbase(USD) - (Binance现货 + OKX现货 + Bybit现货) / N
+            try:
+                _spot = []
+                try:
+                    async with s.get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
+                                     timeout=aiohttp.ClientTimeout(total=5)) as _r:
+                        _spot.append(float((await _r.json())["price"]))
+                except Exception: pass
+                try:
+                    async with s.get("https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT",
+                                     timeout=aiohttp.ClientTimeout(total=5)) as _r:
+                        _d = await _r.json()
+                        if _d.get("code") == "0":
+                            _spot.append(float(_d["data"][0]["last"]))
+                except Exception: pass
+                try:
+                    async with s.get("https://api.bybit.com/v5/market/tickers?category=spot&symbol=BTCUSDT",
+                                     timeout=aiohttp.ClientTimeout(total=5)) as _r:
+                        _d = await _r.json()
+                        if _d.get("retCode") == 0 and _d["result"]["list"]:
+                            _spot.append(float(_d["result"]["list"][0]["lastPrice"]))
+                except Exception: pass
+                async with s.get("https://api.exchange.coinbase.com/products/BTC-USD/ticker",
+                                 timeout=aiohttp.ClientTimeout(total=5)) as _r:
+                    _cb = float((await _r.json()).get("price", 0))
+                if _cb and _spot:
+                    _avg = sum(_spot) / len(_spot)
+                    S["cb_premium"] = round(_cb - _avg, 2)
+                    S["cb_pct"]     = round((_cb - _avg) / _avg * 100, 4)
+            except Exception:
+                pass
+
+        S["ts"] = datetime.now(SGT).strftime("%H:%M:%S")
+    except Exception as e:
+        log.warning(f"core: {e}")
+
+
+async def task_core() -> None:
+    while True:
+        await _fetch_core()
+        if _clients:
+            await bcast({"type": "snapshot", "data": snap()})
+        await asyncio.sleep(5)
+
+
+async def task_funding() -> None:
+    FTIMEOUT = aiohttp.ClientTimeout(total=10)
+    sources = [
+        ("OKX",   "https://www.okx.com/api/v5/public/funding-rate?instId=BTC-USDT-SWAP",
+         lambda d: float(d["data"][0]["fundingRate"]) if d.get("code")=="0" else None),
+        ("Bybit", "https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT",
+         lambda d: float(d["result"]["list"][0]["fundingRate"]) if d.get("retCode")==0 and d["result"]["list"] else None),
+        ("Bitget","https://api.bitget.com/api/mix/v1/market/current-fundRate?symbol=BTCUSDT_UMCBL",
+         lambda d: float(d["data"]["fundingRate"]) if d.get("code")=="00000" else None),
+    ]
+    while True:
+        try:
+            async with aiohttp.ClientSession(timeout=FTIMEOUT) as s:
+                for name, url, extract in sources:
+                    try:
+                        async with s.get(url) as r:
+                            v = extract(await r.json())
+                            if v is not None:
+                                S["funding"][name] = round(v * 100, 4)
+                    except Exception: pass
+        except Exception as e:
+            log.warning(f"funding: {e}")
+        await asyncio.sleep(30)
+
+
+async def task_ib() -> None:
+    while True:
+        try:
+            sys.path.insert(0, "/opt/btc-trader")
+            from data_collector.binance_data import get_todays_ib  # type: ignore
+            result = get_todays_ib()
+            if result:
+                S["ib"] = result
+                log.info(f"IB: {result}")
+        except Exception as e:
+            log.warning(f"IB: {e}")
+        await asyncio.sleep(3600)
+
+
+async def task_okx_liq() -> None:
+    SUB = json.dumps({"op":"subscribe","args":[{"channel":"liquidation-orders","instType":"SWAP"}]})
+    while True:
+        try:
+            async with websockets.connect("wss://ws.okx.com:8443/ws/v5/public",
+                                          ping_interval=20, ping_timeout=10, close_timeout=5) as ws:
+                await ws.send(SUB)
+                log.info("OKX liq WS connected")
+                async for raw in ws:
+                    try:
+                        msg = json.loads(raw)
+                    except Exception: continue
+                    if msg.get("event"): continue
+                    if msg.get("arg",{}).get("channel") != "liquidation-orders": continue
+                    for item in msg.get("data",[]):
+                        if not item.get("instId","").startswith("BTC"): continue
+                        for det in item.get("details",[]):
+                            try:
+                                sz, px = float(det.get("sz",0)), float(det.get("bkPx",0))
+                                usd = sz * px
+                                if usd < 10_000: continue
+                                e = {"time": datetime.now(SGT).strftime("%H:%M:%S"),
+                                     "side": "多爆" if det.get("side")=="buy" else "空爆",
+                                     "price": round(px,1), "usd": usd, "exchange":"OKX"}
+                                S["liq"].insert(0, e); S["liq"] = S["liq"][:100]
+                                await bcast({"type":"liq","data":e})
+                            except Exception: pass
+        except Exception as e:
+            log.warning(f"OKX WS disconnected, retry 5s: {e}")
+            await asyncio.sleep(5)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    log.info("初始化...")
+    try:
+        await asyncio.wait_for(_fetch_core(), timeout=15)
+    except asyncio.TimeoutError:
+        log.warning("初始化超时，跳过")
+    asyncio.create_task(task_core())
+    asyncio.create_task(task_funding())
+    asyncio.create_task(task_ib())
+    asyncio.create_task(task_okx_liq())
+    log.info("BTC Dashboard API v2.0 就绪 · 端口 8001")
+    yield
+
+
+app = FastAPI(title="BTC Dashboard API", version="2.0.0", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET"], allow_headers=["*"])
+
+@app.get("/api/snapshot")
+async def get_snapshot(): return snap()
+
+@app.get("/api/health")
+async def health(): return {"ok": True, "clients": len(_clients), "ts": S["ts"]}
+
+@app.websocket("/ws/live")
+async def ws_live(websocket: WebSocket):
+    await websocket.accept()
+    _clients.add(websocket)
+    log.info(f"+ client  online={len(_clients)}")
+    try:
+        await websocket.send_json({"type":"snapshot","data":snap()})
+        while True:
+            try: await asyncio.wait_for(websocket.receive_text(), timeout=60)
+            except asyncio.TimeoutError: await websocket.send_json({"type":"ping"})
+    except WebSocketDisconnect: pass
+    except Exception: pass
+    finally:
+        _clients.discard(websocket)
+        log.info(f"- client  online={len(_clients)}")

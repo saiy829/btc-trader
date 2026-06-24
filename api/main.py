@@ -1,0 +1,819 @@
+"""
+BTC 实时数据面板 · FastAPI 后端  v5.0
+三大盘口 IB / VP / MP / ETF / 清算 实时数据
+新增：历史数据存储层（SQLite）
+  - 5分钟快照：价格/成交量/OI/Funding/CB溢价
+  - 每日存档：IB/VP/MP/ETF/清算统计
+"""
+import asyncio, importlib, json, logging, sqlite3, sys
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone, timedelta, date
+from typing import Set, Optional
+
+import aiohttp, websockets
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+
+SGT = timezone(timedelta(hours=8))
+logging.basicConfig(level=logging.INFO,
+    format="%(asctime)s  %(levelname)-8s  %(message)s", datefmt="%H:%M:%S")
+log = logging.getLogger("btc-api")
+
+DB_PATH = "/opt/btc-trader/data/dashboard_history.db"
+
+S: dict = {
+    "price": 0.0, "change_24h": 0.0, "volume_24h": 0.0,
+    "funding": {},
+    "oi_btc": 0.0, "oi_changes": {},
+    "cb_premium": 0.0, "cb_pct": 0.0,
+    "liq": [],
+    "ib_asia":   {}, "ib_europe": {}, "ib_us": {},
+    "vp": {}, "mp": {}, "etf": {},
+    "ts": "--:--:--",
+    # 当日清算运行统计（用于每日归档，遇日界自动结转）
+    "liq_daily_date": "", "liq_daily_count": 0, "liq_daily_max": 0.0,
+    "liq_daily_long_total": 0.0, "liq_daily_short_total": 0.0,
+    "liq_yesterday": {},
+    # CVD（累积成交量差值）：每UTC自然日重置，与IB/VP/MP日界统一
+    "cvd_today": 0.0, "cvd_date": "", "cvd_changes": {}, "last_agg_trade_id": None,
+}
+_oi_hist: list = []
+_cvd_hist: list = []
+_clients: Set[WebSocket] = set()
+
+IB_SESSIONS = {
+    "ib_europe": {"name": "欧盘", "start_h": 8,  "end_h": 9,  "sgt": "16:00–17:00"},
+    "ib_us":     {"name": "美盘", "start_h": 13, "end_h": 14, "sgt": "21:00–22:00"},
+}
+
+if "/opt/btc-trader" not in sys.path:
+    sys.path.insert(0, "/opt/btc-trader")
+
+
+# ══════════════════════════════════════════════════════════════════
+#  历史存储：SQLite 初始化 + 读写函数
+# ══════════════════════════════════════════════════════════════════
+def db_init() -> None:
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS snapshots (
+            ts INTEGER PRIMARY KEY,
+            price REAL, volume_24h REAL, oi_btc REAL,
+            funding_binance REAL, funding_avg REAL, cb_premium REAL,
+            cvd REAL
+        )
+    """)
+    # 兼容旧库：若表已存在但缺 cvd 列，补加（不影响已有数据）
+    try:
+        conn.execute("ALTER TABLE snapshots ADD COLUMN cvd REAL")
+    except Exception:
+        pass  # 列已存在
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS daily_archive (
+            date TEXT PRIMARY KEY,
+            ib_asia_high REAL, ib_asia_low REAL, ib_asia_range REAL, ib_asia_type TEXT,
+            ib_europe_high REAL, ib_europe_low REAL,
+            ib_us_high REAL, ib_us_low REAL,
+            vp_poc REAL, vp_vah REAL, vp_val REAL, vp_shape TEXT,
+            mp_high REAL, mp_low REAL, mp_close REAL,
+            etf_flow REAL, etf_source TEXT,
+            liq_count INTEGER, liq_max REAL, liq_long_total REAL, liq_short_total REAL
+        )
+    """)
+    conn.commit()
+    conn.close()
+    log.info(f"SQLite 历史库已初始化: {DB_PATH}")
+
+
+def db_insert_snapshot() -> None:
+    try:
+        avg_fr = (sum(S["funding"].values()) / len(S["funding"])) if S["funding"] else None
+        conn = sqlite3.connect(DB_PATH, timeout=5)
+        conn.execute(
+            "INSERT OR REPLACE INTO snapshots "
+            "(ts, price, volume_24h, oi_btc, funding_binance, funding_avg, cb_premium, cvd) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (int(datetime.now(SGT).timestamp()), S["price"], S["volume_24h"], S["oi_btc"],
+             S["funding"].get("Binance"), avg_fr, S["cb_premium"], S["cvd_today"])
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log.warning(f"db_insert_snapshot error: {e}")
+
+
+def db_insert_daily_archive(date_str: str) -> bool:
+    """归档指定日期（若已存在则跳过）。返回是否新插入。"""
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5)
+        existing = conn.execute("SELECT 1 FROM daily_archive WHERE date=?", (date_str,)).fetchone()
+        if existing:
+            conn.close()
+            return False
+
+        ib_a, ib_e, ib_u = S["ib_asia"], S["ib_europe"], S["ib_us"]
+        vp, mp, etf = S["vp"], S["mp"], S["etf"]
+        liq_y = S["liq_yesterday"]
+
+        conn.execute(
+            "INSERT INTO daily_archive (date, ib_asia_high, ib_asia_low, ib_asia_range, ib_asia_type, "
+            "ib_europe_high, ib_europe_low, ib_us_high, ib_us_low, "
+            "vp_poc, vp_vah, vp_val, vp_shape, mp_high, mp_low, mp_close, "
+            "etf_flow, etf_source, liq_count, liq_max, liq_long_total, liq_short_total) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (date_str,
+             ib_a.get("ib_high"), ib_a.get("ib_low"), ib_a.get("ib_range"), ib_a.get("opening_type"),
+             ib_e.get("ib_high"), ib_e.get("ib_low"),
+             ib_u.get("ib_high"), ib_u.get("ib_low"),
+             vp.get("poc"), vp.get("vah"), vp.get("val"), vp.get("profile_shape"),
+             mp.get("high"), mp.get("low"), mp.get("close"),
+             etf.get("total_yest"), etf.get("source"),
+             liq_y.get("count"), liq_y.get("max"), liq_y.get("long_total"), liq_y.get("short_total"))
+        )
+        conn.commit()
+        conn.close()
+        log.info(f"每日归档已写入: {date_str}")
+        return True
+    except Exception as e:
+        log.warning(f"db_insert_daily_archive error: {e}")
+        return False
+
+
+def db_query_metrics(metric: str, period: str) -> list:
+    """查询指定指标的历史序列。period: 1d/7d/30d/90d/all"""
+    col_map = {
+        "price": "price", "volume_24h": "volume_24h", "oi_btc": "oi_btc",
+        "funding_binance": "funding_binance", "funding_avg": "funding_avg",
+        "cb_premium": "cb_premium", "cvd": "cvd",
+    }
+    col = col_map.get(metric, "price")
+    days_map = {"1d": 1, "7d": 7, "30d": 30, "90d": 90, "all": 36500}
+    days = days_map.get(period, 7)
+    cutoff = int((datetime.now(SGT) - timedelta(days=days)).timestamp())
+
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5)
+        rows = conn.execute(
+            f"SELECT ts, {col} FROM snapshots WHERE ts >= ? AND {col} IS NOT NULL ORDER BY ts ASC",
+            (cutoff,)
+        ).fetchall()
+        conn.close()
+        return [{"ts": r[0], "value": r[1]} for r in rows]
+    except Exception as e:
+        log.warning(f"db_query_metrics error: {e}")
+        return []
+
+
+def db_query_daily_archive(days: int = 30) -> list:
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM daily_archive ORDER BY date DESC LIMIT ?", (days,)
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        log.warning(f"db_query_daily_archive error: {e}")
+        return []
+
+
+def _check_liq_day_rollover() -> None:
+    """检测SGT日界变化，结转当日清算统计到 liq_yesterday，供归档使用"""
+    today_str = datetime.now(SGT).strftime("%Y-%m-%d")
+    if S["liq_daily_date"] != today_str:
+        if S["liq_daily_date"]:
+            S["liq_yesterday"] = {
+                "date": S["liq_daily_date"], "count": S["liq_daily_count"],
+                "max": S["liq_daily_max"], "long_total": S["liq_daily_long_total"],
+                "short_total": S["liq_daily_short_total"],
+            }
+        S["liq_daily_date"] = today_str
+        S["liq_daily_count"] = 0
+        S["liq_daily_max"] = 0.0
+        S["liq_daily_long_total"] = 0.0
+        S["liq_daily_short_total"] = 0.0
+
+
+def calc_oi_changes() -> dict:
+    if len(_oi_hist) < 2: return {}
+    now_ts = datetime.now(SGT).timestamp()
+    cur = S["oi_btc"]
+    TFS = [("5m",300),("15m",900),("30m",1800),("1H",3600),("4H",14400),("12H",43200),("24H",86400)]
+    result = {}
+    for label, secs in TFS:
+        ref_ts = now_ts - secs
+        past = [(t, v) for t, v in _oi_hist if t <= ref_ts + 30]
+        if not past: continue
+        _, ref = min(past, key=lambda x: abs(x[0] - ref_ts))
+        if ref > 0:
+            result[label] = {"pct": round((cur-ref)/ref*100, 3), "val": round(cur-ref, 0)}
+    return result
+
+
+def calc_cvd_changes() -> dict:
+    """CVD多时间段变化，与calc_oi_changes()逻辑完全一致"""
+    if len(_cvd_hist) < 2: return {}
+    now_ts = datetime.now(SGT).timestamp()
+    cur = S["cvd_today"]
+    TFS = [("5m",300),("15m",900),("30m",1800),("1H",3600),("4H",14400)]
+    result = {}
+    for label, secs in TFS:
+        ref_ts = now_ts - secs
+        past = [(t, v) for t, v in _cvd_hist if t <= ref_ts + 30]
+        if not past: continue
+        _, ref = min(past, key=lambda x: abs(x[0] - ref_ts))
+        result[label] = round(cur - ref, 1)
+    return result
+
+
+def snap() -> dict:
+    return {
+        "price": S["price"], "change_24h": S["change_24h"],
+        "volume_24h": S["volume_24h"], "funding": S["funding"],
+        "oi_btc": S["oi_btc"], "oi_changes": S["oi_changes"],
+        "cb_premium": S["cb_premium"], "cb_pct": S["cb_pct"],
+        "liq_feed": S["liq"][:30],
+        "ib_asia": S["ib_asia"], "ib_europe": S["ib_europe"], "ib_us": S["ib_us"],
+        "vp": S["vp"], "mp": S["mp"], "etf": S["etf"],
+        "cvd_today": round(S["cvd_today"], 1), "cvd_changes": S["cvd_changes"],
+        "liq_today": {
+            "count": S["liq_daily_count"], "max": S["liq_daily_max"],
+            "long_total": S["liq_daily_long_total"], "short_total": S["liq_daily_short_total"],
+        },
+        "last_update": S["ts"],
+    }
+
+
+async def bcast(msg: dict) -> None:
+    dead: Set[WebSocket] = set()
+    for ws in _clients.copy():
+        try: await ws.send_json(msg)
+        except Exception: dead.add(ws)
+    _clients.difference_update(dead)
+
+
+TIMEOUT = aiohttp.ClientTimeout(total=8)
+SHORT   = aiohttp.ClientTimeout(total=5)
+
+
+async def _fetch_core() -> None:
+    try:
+        async with aiohttp.ClientSession(timeout=TIMEOUT) as sess:
+            async with sess.get(
+                "https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=BTCUSDT") as r:
+                d = await r.json()
+                S["price"]      = float(d["lastPrice"])
+                S["change_24h"] = float(d["priceChangePercent"])
+                S["volume_24h"] = float(d["quoteVolume"])
+
+            async with sess.get(
+                "https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT") as r:
+                d = await r.json()
+                if d and "lastFundingRate" in d:
+                    S["funding"]["Binance"] = round(float(d["lastFundingRate"]) * 100, 4)
+
+            async with sess.get(
+                "https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT") as r:
+                d = await r.json()
+                oi  = float(d["openInterest"])
+                now = datetime.now(SGT).timestamp()
+                _oi_hist.append((now, oi))
+                _oi_hist[:] = [(t, v) for t, v in _oi_hist if t >= now - 90000]
+                S["oi_btc"]     = oi
+                S["oi_changes"] = calc_oi_changes()
+
+            spot_prices = []
+            try:
+                async with sess.get(
+                    "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT", timeout=SHORT) as r:
+                    spot_prices.append(float((await r.json())["price"]))
+            except Exception: pass
+            try:
+                async with sess.get(
+                    "https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT", timeout=SHORT) as r:
+                    d = await r.json()
+                    if d.get("code")=="0" and d.get("data"):
+                        spot_prices.append(float(d["data"][0]["last"]))
+            except Exception: pass
+            try:
+                async with sess.get(
+                    "https://api.bybit.com/v5/market/tickers?category=spot&symbol=BTCUSDT", timeout=SHORT) as r:
+                    d = await r.json()
+                    if d.get("retCode")==0 and d["result"]["list"]:
+                        spot_prices.append(float(d["result"]["list"][0]["lastPrice"]))
+            except Exception: pass
+            coinbase_price = 0.0
+            try:
+                async with sess.get(
+                    "https://api.exchange.coinbase.com/products/BTC-USD/ticker", timeout=SHORT) as r:
+                    coinbase_price = float((await r.json()).get("price", 0))
+            except Exception: pass
+            if coinbase_price and spot_prices:
+                avg = sum(spot_prices) / len(spot_prices)
+                S["cb_premium"] = round(coinbase_price - avg, 2)
+                S["cb_pct"]     = round((coinbase_price - avg) / avg * 100, 4)
+
+        S["ts"] = datetime.now(SGT).strftime("%H:%M:%S")
+        _check_liq_day_rollover()
+    except Exception as e:
+        log.warning(f"core: {e}")
+
+
+async def task_core() -> None:
+    while True:
+        await _fetch_core()
+        if _clients: await bcast({"type": "snapshot", "data": snap()})
+        await asyncio.sleep(5)
+
+
+async def task_snapshot_recorder() -> None:
+    """
+    每5分钟把核心指标写入历史快照表，对齐到整点边界(:00/:05/:10/:15...)
+    v2修复：原逻辑固定sleep(300)，起始点取决于服务启动时刻，导致时间戳
+    偏移（如15:53/15:58/16:03），与人类习惯的整点刻度不一致。
+    改为每轮动态计算"距下一个5分钟整点还有多久"，自动对齐时钟，
+    不受服务重启时刻影响。
+    """
+    while True:
+        now = datetime.now(SGT)
+        seconds_since_hour = now.minute * 60 + now.second
+        next_boundary = ((seconds_since_hour // 300) + 1) * 300
+        wait_seconds = next_boundary - seconds_since_hour
+        await asyncio.sleep(wait_seconds)
+        db_insert_snapshot()
+        log.info(f"快照已记录(整点对齐 {datetime.now(SGT).strftime('%H:%M')}): "
+                 f"price={S['price']:.1f} OI={S['oi_btc']:.0f} vol={S['volume_24h']:.0f}")
+
+
+async def task_archive_daily() -> None:
+    """每小时检查并归档昨日数据（VP/MP的date字段代表昨日，凡未归档则补上）"""
+    while True:
+        await asyncio.sleep(3600)
+        target_date = S["vp"].get("date") or S["mp"].get("date") if False else None
+        # 优先用 vp.date（昨日），其次 liq_yesterday.date
+        target_date = S["vp"].get("date") or S["liq_yesterday"].get("date")
+        if target_date:
+            db_insert_daily_archive(target_date)
+
+
+async def task_funding() -> None:
+    """OKX/Bybit/Bitget/Gate funding，复用 multi_funding.py 已验证实现"""
+    while True:
+        result = await asyncio.get_event_loop().run_in_executor(None, _load_funding_others_sync)
+        if result:
+            S["funding"].update(result)
+            log.info(f"Funding 采集完成(OKX/Bybit/Bitget/Gate): {list(result.keys())}")
+        else:
+            log.warning("Funding(others): 返回空数据")
+        await asyncio.sleep(30)
+
+
+def _load_funding_others_sync() -> dict:
+    try:
+        mod_name = "data_collector.multi_funding"
+        if mod_name in sys.modules:
+            mod = importlib.reload(sys.modules[mod_name])
+        else:
+            import data_collector.multi_funding as mod
+        result = {}
+        for fn, key in [(mod._okx, "OKX"), (mod._bybit, "Bybit"),
+                         (mod._bitget, "Bitget"), (mod._gate, "Gate")]:
+            try:
+                r = fn()
+                if r:
+                    result[key] = round(r["rate"], 4)
+            except Exception as e:
+                log.warning(f"Funding {key} 错误: {e}")
+        return result
+    except Exception as e:
+        log.warning(f"Funding(others) load error: {e}")
+        return {}
+
+
+def _load_ib_sync() -> dict:
+    try:
+        mod_name = "data_collector.binance_data"
+        if mod_name in sys.modules:
+            mod = importlib.reload(sys.modules[mod_name])
+        else:
+            import data_collector.binance_data as mod
+        result = mod.get_todays_ib()
+        return result or {}
+    except Exception as e:
+        log.warning(f"IB (Asia) load error: {e}")
+        return {}
+
+
+async def task_ib_asia() -> None:
+    while True:
+        result = await asyncio.get_event_loop().run_in_executor(None, _load_ib_sync)
+        if result:
+            S["ib_asia"] = result
+            log.info(f"亚盘IB  H={result.get('ib_high')}  L={result.get('ib_low')}")
+        else:
+            log.warning("亚盘IB: 返回空数据")
+        await asyncio.sleep(900)
+
+
+async def fetch_kline_ib(sess_key: str) -> dict:
+    cfg     = IB_SESSIONS[sess_key]
+    now_utc = datetime.now(timezone.utc)
+    today   = now_utc.date()
+
+    start_utc = datetime(today.year, today.month, today.day,
+                         cfg["start_h"], 0, 0, tzinfo=timezone.utc)
+    end_utc   = datetime(today.year, today.month, today.day,
+                         cfg["end_h"],   0, 0, tzinfo=timezone.utc)
+
+    if now_utc < start_utc:
+        return {"name": cfg["name"], "sgt": cfg["sgt"], "status": "pending"}
+
+    actual_end = min(now_utc, end_utc)
+    is_forming = now_utc < end_utc
+
+    start_ms = int(start_utc.timestamp()  * 1000)
+    end_ms   = int(actual_end.timestamp() * 1000)
+
+    try:
+        async with aiohttp.ClientSession(timeout=TIMEOUT) as sess:
+            async with sess.get(
+                "https://fapi.binance.com/fapi/v1/klines",
+                params={"symbol": "BTCUSDT", "interval": "5m",
+                        "startTime": start_ms, "endTime": end_ms, "limit": 24}
+            ) as r:
+                klines = await r.json()
+
+        if not klines or not isinstance(klines, list):
+            return {"name": cfg["name"], "sgt": cfg["sgt"], "status": "no_data"}
+
+        highs    = [float(k[2]) for k in klines]
+        lows     = [float(k[3]) for k in klines]
+        ib_high  = max(highs)
+        ib_low   = min(lows)
+
+        return {
+            "name":     cfg["name"],
+            "sgt":      cfg["sgt"],
+            "status":   "forming" if is_forming else "complete",
+            "ib_high":  round(ib_high, 1),
+            "ib_low":   round(ib_low, 1),
+            "ib_mid":   round((ib_high + ib_low) / 2, 1),
+            "ib_range": round(ib_high - ib_low, 1),
+            "ib_pct":   round((ib_high - ib_low) / ib_low * 100, 3) if ib_low else 0,
+        }
+    except Exception as e:
+        log.warning(f"{cfg['name']} IB 错误: {e}")
+        return {"name": cfg["name"], "sgt": cfg["sgt"], "status": "error"}
+
+
+async def task_ib_sessions() -> None:
+    while True:
+        S["ib_europe"] = await fetch_kline_ib("ib_europe")
+        S["ib_us"]     = await fetch_kline_ib("ib_us")
+        log.info(f"欧盘IB {S['ib_europe'].get('status')}  美盘IB {S['ib_us'].get('status')}")
+        await asyncio.sleep(900)
+
+
+def _load_vp_sync() -> dict:
+    try:
+        mod_name = "data_collector.binance_data"
+        mod = sys.modules.get(mod_name) or importlib.import_module(mod_name)
+        return mod.get_yesterday_volume_profile() or {}
+    except Exception as e:
+        log.warning(f"VP load error: {e}")
+        return {}
+
+
+async def task_vp() -> None:
+    while True:
+        result = await asyncio.get_event_loop().run_in_executor(None, _load_vp_sync)
+        if result:
+            S["vp"] = result
+            log.info(f"VP  POC=${result.get('poc')}  VA=${result.get('val')}-${result.get('vah')}")
+        else:
+            log.warning("VP: 返回空数据")
+        await asyncio.sleep(900)
+
+
+def _load_mp_sync() -> dict:
+    try:
+        mod_name = "data_collector.binance_data"
+        mod = sys.modules.get(mod_name) or importlib.import_module(mod_name)
+        y = mod.get_yesterday_ohlcv()
+        if not y:
+            return {}
+        return {"has_data": True, "high": y.get("high",0), "low": y.get("low",0),
+                "close": y.get("close",0), "open": y.get("open",0)}
+    except Exception as e:
+        log.warning(f"MP load error: {e}")
+        return {}
+
+
+async def task_mp() -> None:
+    while True:
+        result = await asyncio.get_event_loop().run_in_executor(None, _load_mp_sync)
+        if result:
+            S["mp"] = result
+            log.info(f"MP  PDH=${result.get('high')}  PDL=${result.get('low')}  PDC=${result.get('close')}")
+        else:
+            log.warning("MP: 返回空数据")
+        await asyncio.sleep(900)
+
+
+def _load_etf_sync() -> dict:
+    try:
+        mod_name = "data_collector.etf_data"
+        mod = sys.modules.get(mod_name) or importlib.import_module(mod_name)
+        return mod.fetch_etf_flows() or {}
+    except Exception as e:
+        log.warning(f"ETF load error: {e}")
+        return {}
+
+
+async def task_etf() -> None:
+    while True:
+        result = await asyncio.get_event_loop().run_in_executor(None, _load_etf_sync)
+        if result:
+            S["etf"] = result
+            log.info(f"ETF  来源={result.get('source')}  最新={result.get('yest_str')}")
+        else:
+            log.warning("ETF: 返回空数据")
+        await asyncio.sleep(1800)
+
+
+async def task_cvd() -> None:
+    """
+    CVD（累积成交量差值）：轮询Binance aggTrades增量计算
+    用REST而非WebSocket，规避fstream.binance.com的德国IP封锁。
+    每UTC自然日（北京时间08:00）重置归零，与IB/VP/MP的日界口径统一。
+    """
+    while True:
+        try:
+            today_str = datetime.now(SGT).strftime("%Y-%m-%d")
+            if S["cvd_date"] != today_str:
+                S["cvd_today"] = 0.0
+                S["cvd_date"] = today_str
+                S["last_agg_trade_id"] = None
+                _cvd_hist.clear()
+                log.info(f"CVD 日界重置: {today_str}")
+
+            async with aiohttp.ClientSession(timeout=TIMEOUT) as sess:
+                params = {"symbol": "BTCUSDT", "limit": 1000}
+                if S["last_agg_trade_id"] is not None:
+                    params["fromId"] = S["last_agg_trade_id"] + 1
+                async with sess.get(
+                    "https://fapi.binance.com/fapi/v1/aggTrades", params=params) as r:
+                    trades = await r.json()
+
+            if trades and isinstance(trades, list):
+                if S["last_agg_trade_id"] is None:
+                    # 首次运行：仅建立游标起点，不计入该批次（避免把过去未知时段的成交算进今日CVD）
+                    S["last_agg_trade_id"] = trades[-1]["a"]
+                else:
+                    delta = 0.0
+                    for t in trades:
+                        qty = float(t["q"])
+                        delta += -qty if t["m"] else qty  # m=True:卖方主动 / m=False:买方主动
+                    S["cvd_today"] += delta
+                    S["last_agg_trade_id"] = trades[-1]["a"]
+
+                    now = datetime.now(SGT).timestamp()
+                    _cvd_hist.append((now, S["cvd_today"]))
+                    _cvd_hist[:] = [(t,v) for t,v in _cvd_hist if t >= now - 18000]
+                    S["cvd_changes"] = calc_cvd_changes()
+        except Exception as e:
+            log.warning(f"CVD task error: {e}")
+        await asyncio.sleep(8)
+
+
+async def task_okx_liq() -> None:
+    sub_msg = json.dumps({"op":"subscribe","args":[{"channel":"liquidation-orders","instType":"SWAP"}]})
+    while True:
+        try:
+            async with websockets.connect("wss://ws.okx.com:8443/ws/v5/public",
+                                          ping_interval=20,ping_timeout=10,close_timeout=5) as ws:
+                await ws.send(sub_msg)
+                log.info("OKX liq WS connected")
+                async for raw in ws:
+                    try: msg = json.loads(raw)
+                    except Exception: continue
+                    if msg.get("event"): continue
+                    if msg.get("arg",{}).get("channel") != "liquidation-orders": continue
+                    for item in msg.get("data",[]):
+                        if not item.get("instId","").startswith("BTC"): continue
+                        for det in item.get("details",[]):
+                            try:
+                                sz,px = float(det.get("sz",0)),float(det.get("bkPx",0))
+                                usd = sz*0.001*px
+                                if usd < 10_000: continue
+                                side_is_long_liq = det.get("side") == "sell"  # sell清算=多头被强平
+                                e = {"time": datetime.now(SGT).strftime("%H:%M:%S"),
+                                     "side": "多爆" if det.get("side")=="buy" else "空爆",
+                                     "price": round(px,1), "usd": usd, "exchange":"OKX"}
+                                S["liq"].insert(0,e); S["liq"] = S["liq"][:100]
+
+                                _check_liq_day_rollover()
+                                S["liq_daily_count"] += 1
+                                S["liq_daily_max"] = max(S["liq_daily_max"], usd)
+                                if det.get("side") == "buy":
+                                    S["liq_daily_short_total"] += usd
+                                else:
+                                    S["liq_daily_long_total"] += usd
+
+                                await bcast({"type":"liq","data":e})
+                            except Exception: pass
+        except Exception as e:
+            log.warning(f"OKX WS error, retry 5s: {e}")
+            await asyncio.sleep(5)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    log.info("初始化...")
+    db_init()
+    _check_liq_day_rollover()
+
+    try: await asyncio.wait_for(_fetch_core(), timeout=20)
+    except asyncio.TimeoutError: log.warning("初始化超时")
+
+    ib_a = await asyncio.get_event_loop().run_in_executor(None, _load_ib_sync)
+    if ib_a: S["ib_asia"] = ib_a
+
+    S["ib_europe"] = await fetch_kline_ib("ib_europe")
+    S["ib_us"]     = await fetch_kline_ib("ib_us")
+
+    vp_init = await asyncio.get_event_loop().run_in_executor(None, _load_vp_sync)
+    if vp_init: S["vp"] = vp_init
+
+    mp_init = await asyncio.get_event_loop().run_in_executor(None, _load_mp_sync)
+    if mp_init: S["mp"] = mp_init
+
+    etf_init = await asyncio.get_event_loop().run_in_executor(None, _load_etf_sync)
+    if etf_init: S["etf"] = etf_init
+
+    # 启动时检查是否有遗漏的归档（例如服务刚部署，VP已有数据但今日还没归档过昨日）
+    if S["vp"].get("date"):
+        db_insert_daily_archive(S["vp"]["date"])
+
+    asyncio.create_task(task_core())
+    asyncio.create_task(task_funding())
+    asyncio.create_task(task_ib_asia())
+    asyncio.create_task(task_ib_sessions())
+    asyncio.create_task(task_vp())
+    asyncio.create_task(task_mp())
+    asyncio.create_task(task_etf())
+    asyncio.create_task(task_okx_liq())
+    asyncio.create_task(task_cvd())
+    asyncio.create_task(task_snapshot_recorder())
+    asyncio.create_task(task_archive_daily())
+    log.info("BTC Dashboard API v5.0 就绪 · 端口 8001 · 历史存储已启用")
+    yield
+
+
+app = FastAPI(title="BTC Dashboard API", version="5.0.0", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["*"],
+                   allow_methods=["GET","POST"], allow_headers=["*"])
+
+
+@app.get("/api/snapshot")
+async def get_snapshot(): return snap()
+
+@app.get("/api/health")
+async def health():
+    return {"ok": True, "clients": len(_clients), "ts": S["ts"]}
+
+@app.get("/api/history/metrics")
+async def history_metrics(metric: str = "price", period: str = "7d"):
+    data = db_query_metrics(metric, period)
+    return {"metric": metric, "period": period, "data": data}
+
+@app.get("/api/history/daily-archive")
+async def history_daily_archive(days: int = 30):
+    data = db_query_daily_archive(days)
+    return {"days": days, "data": data}
+
+@app.post("/api/refresh-ib")
+async def refresh_ib():
+    result = await asyncio.get_event_loop().run_in_executor(None, _load_ib_sync)
+    if result: S["ib_asia"] = result
+    S["ib_europe"] = await fetch_kline_ib("ib_europe")
+    S["ib_us"]     = await fetch_kline_ib("ib_us")
+    return {"ok": True}
+
+@app.websocket("/ws/live")
+async def ws_live(websocket: WebSocket):
+    await websocket.accept(); _clients.add(websocket)
+    log.info(f"+ client  online={len(_clients)}")
+    try:
+        await websocket.send_json({"type":"snapshot","data":snap()})
+        while True:
+            try: await asyncio.wait_for(websocket.receive_text(), timeout=60)
+            except asyncio.TimeoutError: await websocket.send_json({"type":"ping"})
+    except WebSocketDisconnect: pass
+    except Exception: pass
+    finally:
+        _clients.discard(websocket)
+        log.info(f"- client  online={len(_clients)}")
+
+
+
+
+
+# ══════════════════════════════════════════════════════════════════
+#  以下代码追加到 /opt/btc-trader/api/main.py 的末尾
+#  不需要单独文件，不需要 import，直接粘贴进去即可
+#  规避 uvicorn 启动时 binance_routes 模块路径找不到的问题
+# ══════════════════════════════════════════════════════════════════
+
+import sqlite3 as _sqlite3
+import time as _time
+
+_BINANCE_DB = "/opt/btc-trader/btc_history.db"
+
+
+def _bq(sql: str, params: tuple = ()):
+    """Binance 数据专用查询工具"""
+    try:
+        conn = _sqlite3.connect(_BINANCE_DB, timeout=5)
+        conn.row_factory = _sqlite3.Row
+        rows = conn.execute(sql, params).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+@app.get("/api/binance/summary")
+async def binance_summary():
+    """
+    Binance 数据摘要：OI / 资金费率 / 多空比 / 当前象限
+    供 mb.661688.xyz 面板调用
+    """
+    now = int(_time.time())
+
+    oi      = _bq("SELECT * FROM binance_oi        ORDER BY ts DESC LIMIT 1")
+    funding = _bq("SELECT * FROM binance_funding    ORDER BY ts DESC LIMIT 1")
+    ls_top  = _bq("SELECT * FROM binance_ls_top     ORDER BY ts DESC LIMIT 1")
+    ls_gl   = _bq("SELECT * FROM binance_ls_global  ORDER BY ts DESC LIMIT 1")
+    struct  = _bq("SELECT * FROM binance_structure  ORDER BY ts DESC LIMIT 1")
+
+    return {
+        "server_ts":        now,
+        "open_interest":    oi[0]      if oi      else None,
+        "funding_rate":     funding[0] if funding  else None,
+        "ls_top":           ls_top[0]  if ls_top   else None,
+        "ls_global":        ls_gl[0]   if ls_gl    else None,
+        "market_structure": struct[0]  if struct   else None,
+    }
+
+
+@app.get("/api/binance/oi/history")
+async def binance_oi_history(hours: int = 24):
+    """OI 时序数据，供面板折线图使用，默认 24 小时"""
+    cutoff = int(_time.time()) - hours * 3600
+    rows = _bq(
+        "SELECT ts, oi_usd, mark_px FROM binance_oi WHERE ts >= ? ORDER BY ts ASC",
+        (cutoff,)
+    )
+    return {"hours": hours, "count": len(rows), "data": rows}
+
+
+@app.get("/api/binance/funding/history")
+async def binance_funding_history(hours: int = 48):
+    """资金费率历史，默认 48 小时"""
+    cutoff = int(_time.time()) - hours * 3600
+    rows = _bq(
+        "SELECT ts, rate, premium_pct FROM binance_funding WHERE ts >= ? ORDER BY ts ASC",
+        (cutoff,)
+    )
+    return {"hours": hours, "count": len(rows), "data": rows}
+
+
+@app.get("/api/binance/ls/history")
+async def binance_ls_history(hours: int = 24):
+    """大户多空比历史，默认 24 小时"""
+    cutoff = int(_time.time()) - hours * 3600
+    top = _bq(
+        "SELECT ts, long_pct, short_pct, ls_ratio FROM binance_ls_top WHERE ts >= ? ORDER BY ts ASC",
+        (cutoff,)
+    )
+    gl = _bq(
+        "SELECT ts, long_pct, short_pct, ls_ratio FROM binance_ls_global WHERE ts >= ? ORDER BY ts ASC",
+        (cutoff,)
+    )
+    return {"hours": hours, "top_traders": top, "global": gl}
+
+
+@app.get("/api/binance/structure")
+async def binance_structure(hours: int = 24):
+    """市场结构象限历史，供简报和面板展示"""
+    cutoff = int(_time.time()) - hours * 3600
+    rows = _bq("""
+        SELECT ts, quadrant, oi_chg, px_chg, oi_usd, mark_px, funding, top_ls, note
+        FROM binance_structure
+        WHERE ts >= ?
+        ORDER BY ts DESC
+    """, (cutoff,))
+    return {"hours": hours, "count": len(rows), "data": rows}

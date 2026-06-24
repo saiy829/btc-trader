@@ -1,0 +1,667 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BTC 实时面板 · mb.661688.xyz</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:#04091a;--bg2:#080f24;--card:#0b1428;--card2:#0e1a35;
+  --border:#1a2a45;--border2:#243a5e;
+  --txt:#cee0f5;--txt2:#7b9bbf;--txt3:#3d5a80;
+  --up:#00e5cc;--down:#ff3d6e;--warn:#ffb300;--accent:#4d9fff;
+  --btc:#f7931a;--purple:#a78bfa;--orange:#ff8c42;
+  --gup:0 0 8px rgba(0,229,204,.4);--gdn:0 0 8px rgba(255,61,110,.4);
+  --gbtc:0 0 10px rgba(247,147,26,.45);
+  --font-n:'JetBrains Mono',monospace;--font-u:'Inter',system-ui,sans-serif;
+  --scanline:repeating-linear-gradient(0deg,transparent,transparent 3px,rgba(77,159,255,.015) 3px,rgba(77,159,255,.015) 4px);
+}
+html.light {
+  --bg:#eef2f8;--bg2:#e4eaf3;--card:#ffffff;--card2:#f5f8fe;
+  --border:#ccd8e8;--border2:#a8bcd4;
+  --txt:#18263e;--txt2:#3a5070;--txt3:#7890a8;
+  --up:#007a65;--down:#c8183a;--warn:#cc7800;--accent:#1a6bcc;
+  --btc:#b86000;--purple:#6040b0;--orange:#c05010;
+  --gup:none;--gdn:none;--gbtc:none;--scanline:none;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+html,body{height:100%;background:var(--bg);color:var(--txt);font-family:var(--font-n);
+  font-size:13px;overflow:hidden;-webkit-font-smoothing:antialiased;transition:background .25s,color .25s;}
+#app{display:grid;
+  grid-template-rows:64px 1fr 1fr auto 1fr;
+  grid-template-columns:1fr 1fr 1fr 1fr;
+  grid-template-areas:
+    "hdr  hdr  hdr  hdr"
+    "fund oi   ib   ib"
+    "vp   mp   etf  etf"
+    "cvd  cvd  cvd  cvd"
+    "liq  liq  stat stat";
+  gap:6px;padding:6px;height:100vh;}
+
+/* ═══ HEADER ════════════════════════════════════════════════════ */
+.header{grid-area:hdr;background:var(--card);border:1px solid var(--border);border-radius:6px;
+  display:flex;align-items:center;padding:0 14px;position:relative;overflow:hidden;}
+.header::before{content:'';position:absolute;inset:0;background:var(--scanline);pointer-events:none;}
+.hdr-logo{font-size:18px;color:var(--btc);text-shadow:var(--gbtc);margin-right:10px;font-weight:700;letter-spacing:-1px;flex-shrink:0;}
+.hdr-price{font-size:30px;font-weight:700;letter-spacing:-.5px;color:var(--txt);margin-right:10px;font-family:var(--font-n);transition:color .3s;}
+.hdr-price.fu{color:var(--up);text-shadow:var(--gup);animation:pop .6s ease;}
+.hdr-price.fd{color:var(--down);text-shadow:var(--gdn);animation:pop .6s ease;}
+@keyframes pop{0%{transform:scale(1);}25%{transform:scale(1.016);}100%{transform:scale(1);}}
+.hdr-chg{font-size:13px;font-weight:600;padding:3px 8px;border-radius:4px;margin-right:14px;flex-shrink:0;}
+.hdr-chg.up{background:rgba(0,229,204,.12);color:var(--up);}
+.hdr-chg.dn{background:rgba(255,61,110,.12);color:var(--down);}
+.hdr-div{width:1px;height:26px;background:var(--border2);margin:0 12px;flex-shrink:0;}
+.hdr-meta{display:flex;gap:16px;font-family:var(--font-u);flex:1;min-width:0;overflow:hidden;}
+.hdr-item{display:flex;flex-direction:column;flex-shrink:0;}
+.hdr-lbl{font-size:8px;color:var(--txt3);text-transform:uppercase;letter-spacing:1px;margin-bottom:1px;}
+.hdr-val{font-size:12px;color:var(--txt2);font-family:var(--font-n);}
+.hdr-actions{display:flex;align-items:center;gap:8px;flex-shrink:0;}
+.ws-dot{width:6px;height:6px;border-radius:50%;}
+.ws-dot.on{background:var(--up);box-shadow:0 0 6px var(--up);animation:blink 2.5s infinite;}
+.ws-dot.off{background:var(--down);}
+@keyframes blink{0%,100%{opacity:1;}50%{opacity:.3;}}
+.ws-txt{font-size:10px;color:var(--txt3);font-family:var(--font-u);}
+.theme-btn{background:var(--card2);border:1px solid var(--border2);border-radius:5px;
+  color:var(--txt2);font-size:13px;cursor:pointer;padding:3px 8px;transition:background .2s;font-family:var(--font-u);}
+.theme-btn:hover{background:var(--border);}
+
+/* ═══ CARDS ══════════════════════════════════════════════════════ */
+.card{background:var(--card);border:1px solid var(--border);border-radius:6px;
+  padding:9px 11px;display:flex;flex-direction:column;overflow:hidden;min-height:0;}
+.card-title{font-size:8px;font-weight:600;text-transform:uppercase;letter-spacing:1.5px;
+  color:var(--txt3);font-family:var(--font-u);margin-bottom:7px;padding-bottom:6px;
+  border-bottom:1px solid var(--border);flex-shrink:0;display:flex;justify-content:space-between;align-items:center;}
+.ct-sub{font-size:8px;letter-spacing:0;color:var(--txt3);}
+.no-data{color:var(--txt3);text-align:center;margin:auto;font-family:var(--font-u);font-size:11px;}
+
+/* ═══ FUNDING ════════════════════════════════════════════════════ */
+.fund-panel{grid-area:fund;}
+.fund-row{display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid var(--border);}
+.fund-row:last-of-type{border-bottom:none;}
+.fund-ex{font-size:11px;color:var(--txt2);font-family:var(--font-u);}
+.fund-rate{font-size:12px;font-weight:600;}
+.sentiment{margin-top:6px;padding:5px 8px;background:var(--card2);border-radius:4px;
+  display:flex;justify-content:space-between;align-items:center;border-left:3px solid var(--border2);flex-shrink:0;}
+.sent-lbl{font-size:9px;color:var(--txt3);font-family:var(--font-u);}
+.sent-val{font-size:11px;font-weight:600;font-family:var(--font-u);}
+
+/* ═══ OI ════════════════════════════════════════════════════════ */
+.oi-panel{grid-area:oi;}
+.oi-main{font-size:20px;font-weight:700;letter-spacing:-.5px;margin-bottom:1px;}
+.oi-usd{font-size:10px;color:var(--txt3);margin-bottom:6px;}
+.oi-tf-table{display:grid;grid-template-columns:34px 1fr 78px;gap:0;flex:1;overflow:hidden;}
+.oi-tf-hdr{font-size:8px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;
+  color:var(--txt3);font-family:var(--font-u);padding:3px 3px;border-bottom:1px solid var(--border);}
+.oi-tf-lbl{font-size:11px;font-weight:700;color:var(--txt3);font-family:var(--font-u);
+  display:flex;align-items:center;padding:4px 3px;border-bottom:1px solid rgba(26,42,69,.5);}
+.oi-tf-val{display:flex;align-items:center;gap:3px;padding:4px 3px;font-size:11px;
+  border-bottom:1px solid rgba(26,42,69,.5);}
+.oi-tf-pct{display:flex;align-items:center;justify-content:flex-end;padding:4px 3px;
+  font-size:12px;font-weight:700;border-bottom:1px solid rgba(26,42,69,.5);}
+.oi-miss{color:var(--txt3);font-size:9px;font-family:var(--font-u);}
+
+/* ═══ IB 三大盘口 · 纵向共享轴对比图 ═══════════════════════════════ */
+.ib-panel{grid-area:ib;}
+.ib-chart-svg{width:100%;flex:1;min-height:0;display:block;}
+.ib-axis-line{stroke:var(--border);stroke-width:1;}
+.ib-axis-text{font-family:var(--font-n);font-size:9px;fill:var(--txt3);}
+.ib-bar-price{font-family:var(--font-n);font-size:10px;font-weight:700;}
+.ib-bar-label{font-family:var(--font-u);font-size:10px;font-weight:600;fill:var(--txt2);}
+.ib-current-line{stroke:var(--warn);stroke-width:1.4;stroke-dasharray:4,3;}
+.ib-current-label{font-family:var(--font-n);font-size:10px;font-weight:700;fill:var(--warn);}
+.ib-legend{display:flex;justify-content:space-around;margin-top:5px;padding-top:6px;
+  border-top:1px solid var(--border);flex-shrink:0;gap:6px;}
+.ib-legend-item{display:flex;flex-direction:column;align-items:center;gap:2px;flex:1;min-width:0;}
+.ib-legend-name{font-size:9px;font-weight:700;font-family:var(--font-u);
+  display:flex;align-items:center;gap:3px;white-space:nowrap;}
+.ib-legend-range{font-size:8px;color:var(--txt3);font-family:var(--font-n);}
+.ib-legend-badge{font-size:7px;padding:1px 4px;border-radius:3px;font-family:var(--font-u);font-weight:600;}
+.badge-complete{background:rgba(0,229,204,.1);color:var(--up);}
+.badge-forming {background:rgba(255,179,0,.12);color:var(--warn);}
+.badge-pending {background:rgba(61,90,128,.15);color:var(--txt3);}
+.badge-error   {background:rgba(255,61,110,.1);color:var(--down);}
+.ib-asia-detail{margin-top:6px;padding:5px 7px;background:var(--card2);border-radius:4px;
+  border-left:3px solid var(--purple);flex-shrink:0;}
+.ib-ot{font-size:10px;font-weight:600;color:var(--purple);font-family:var(--font-u);margin-bottom:3px;}
+.ib-obs-t{font-size:8px;color:var(--txt3);text-transform:uppercase;letter-spacing:.5px;
+  font-family:var(--font-u);margin-bottom:2px;}
+.ib-obs-r{display:flex;justify-content:space-between;font-size:10px;color:var(--txt2);}
+
+/* ═══ VP / MP 单柱价格尺（与IB视觉语言统一）═══════════════════════ */
+.vp-panel{grid-area:vp;} .mp-panel{grid-area:mp;}
+.mini-chart-wrap{display:flex;gap:8px;flex:1;min-height:0;}
+.mini-chart-svg{flex-shrink:0;height:100%;}
+.mini-info{flex:1;display:flex;flex-direction:column;justify-content:center;gap:5px;min-width:0;}
+.mini-row{display:flex;justify-content:space-between;align-items:baseline;gap:4px;}
+.mini-lbl{font-size:9px;color:var(--txt3);font-family:var(--font-u);flex-shrink:0;}
+.mini-val{font-size:12px;font-weight:700;font-family:var(--font-n);}
+.mini-chips{display:flex;flex-wrap:wrap;gap:3px;margin-top:2px;}
+.mini-chip{font-size:8px;padding:1px 5px;border-radius:3px;background:var(--card2);
+  color:var(--txt2);font-family:var(--font-n);border:1px solid var(--border2);}
+.mini-shape{font-size:9px;color:var(--txt3);font-family:var(--font-u);line-height:1.4;margin-top:3px;}
+.mp-position{font-size:9.5px;color:var(--txt2);font-family:var(--font-u);line-height:1.5;margin-top:4px;
+  padding-top:5px;border-top:1px solid var(--border);}
+
+/* ═══ ETF 资金流向 ════════════════════════════════════════════════ */
+.etf-panel{grid-area:etf;}
+.etf-main-row{display:flex;align-items:baseline;gap:8px;margin-bottom:2px;}
+.etf-main-val{font-size:19px;font-weight:700;font-family:var(--font-n);}
+.etf-date{font-size:9px;color:var(--txt3);font-family:var(--font-u);}
+.etf-src{font-size:8px;color:var(--txt3);font-family:var(--font-u);margin-bottom:6px;display:flex;align-items:center;gap:4px;}
+.etf-cv-badge{font-size:7px;padding:1px 4px;border-radius:3px;background:rgba(0,229,204,.1);color:var(--up);font-weight:600;}
+.etf-stats{display:flex;gap:14px;margin-bottom:6px;}
+.etf-stat-item{display:flex;flex-direction:column;}
+.etf-stat-lbl{font-size:8px;color:var(--txt3);font-family:var(--font-u);text-transform:uppercase;}
+.etf-stat-val{font-size:12px;font-weight:700;font-family:var(--font-n);}
+.etf-signal{padding:5px 8px;background:var(--card2);border-radius:4px;border-left:3px solid var(--border2);
+  font-size:10px;color:var(--txt2);font-family:var(--font-u);flex-shrink:0;line-height:1.4;}
+.etf-top{font-size:9px;color:var(--txt3);font-family:var(--font-u);margin-top:5px;}
+
+/* ═══ CVD 累积成交量差值 ═══════════════════════════════════════════ */
+.cvd-panel{grid-area:cvd;flex-direction:row!important;align-items:center;gap:18px;padding:8px 14px!important;}
+.cvd-main{display:flex;flex-direction:column;flex-shrink:0;min-width:130px;}
+.cvd-lbl{font-size:9px;color:var(--txt3);font-family:var(--font-u);text-transform:uppercase;letter-spacing:1px;}
+.cvd-val{font-size:20px;font-weight:700;font-family:var(--font-n);}
+.cvd-div{width:1px;align-self:stretch;background:var(--border2);flex-shrink:0;}
+.cvd-tf-row{display:flex;gap:14px;flex:1;flex-wrap:wrap;}
+.cvd-tf-item{display:flex;flex-direction:column;align-items:center;min-width:54px;}
+.cvd-tf-lbl{font-size:9px;color:var(--txt3);font-family:var(--font-u);margin-bottom:2px;}
+.cvd-tf-val{font-size:12px;font-weight:700;font-family:var(--font-n);}
+.cvd-note{font-size:9px;color:var(--txt3);font-family:var(--font-u);flex-shrink:0;white-space:nowrap;}
+
+/* ═══ LIQUIDATION ════════════════════════════════════════════════ */
+.liq-panel{grid-area:liq;}
+.liq-list{flex:1;overflow-y:auto;overflow-x:hidden;scrollbar-width:thin;
+  scrollbar-color:var(--border) transparent;display:flex;flex-direction:column;gap:2px;min-height:0;}
+.liq-row{display:grid;grid-template-columns:64px 42px 100px 1fr 36px;gap:6px;
+  align-items:center;padding:4px 6px;border-radius:3px;font-size:11px;flex-shrink:0;border-left:2px solid transparent;}
+.liq-row.lng{border-left-color:var(--down);background:rgba(255,61,110,.05);}
+.liq-row.sht{border-left-color:var(--up);background:rgba(0,229,204,.04);}
+.liq-time{color:var(--txt3);font-size:10px;}
+.liq-side{font-size:9px;font-weight:700;padding:1px 4px;border-radius:3px;text-align:center;font-family:var(--font-u);}
+.lng .liq-side{color:var(--down);background:rgba(255,61,110,.15);}
+.sht .liq-side{color:var(--up);background:rgba(0,229,204,.12);}
+.liq-price{color:var(--txt3);font-size:10px;}
+.liq-usd{font-size:12px;font-weight:700;}
+.lng .liq-usd{color:var(--down);}.sht .liq-usd{color:var(--up);}
+.liq-ex{font-size:9px;color:var(--txt3);text-align:right;font-family:var(--font-u);}
+.liq-empty{color:var(--txt3);font-family:var(--font-u);font-size:11px;text-align:center;margin:auto;line-height:2;}
+.liq-enter-active{transition:all .28s ease;}.liq-enter-from{opacity:0;transform:translateX(10px);}
+
+/* ═══ STATUS ════════════════════════════════════════════════════ */
+.stat-panel{grid-area:stat;}
+.stat-row{display:flex;justify-content:space-between;align-items:center;
+  padding:4px 0;border-bottom:1px solid var(--border);font-size:11px;}
+.stat-lbl{color:var(--txt2);font-family:var(--font-u);font-size:10px;}
+.stat-val{font-family:var(--font-n);font-size:11px;}
+.cb-box{margin-bottom:4px;padding:6px 8px;background:var(--card2);border-radius:4px;
+  border-left:3px solid var(--accent);flex-shrink:0;}
+.cb-title{font-size:8px;color:var(--txt3);text-transform:uppercase;letter-spacing:1px;font-family:var(--font-u);margin-bottom:3px;}
+.cb-val{font-size:14px;font-weight:700;margin-bottom:2px;}
+.cb-note{font-size:9px;color:var(--txt3);font-family:var(--font-u);line-height:1.4;}
+.stat-note{margin-top:auto;padding-top:5px;font-size:8px;color:var(--txt3);
+  font-family:var(--font-u);text-align:center;border-top:1px solid var(--border);line-height:1.6;}
+
+/* ═══ UTILS ══════════════════════════════════════════════════════ */
+.up{color:var(--up)!important;}.dn{color:var(--down)!important;}
+.warn{color:var(--warn)!important;}.dim{color:var(--txt3)!important;}
+.acc{color:var(--accent)!important;}.btc-c{color:var(--btc)!important;}
+.online{color:var(--up)!important;}.offline{color:var(--down)!important;}
+</style>
+</head>
+<body>
+<div id="app">
+
+<!-- ══ HEADER ══════════════════════════════════════════════════ -->
+<header class="header">
+  <span class="hdr-logo">₿TC</span>
+  <span class="hdr-price" :class="{'fu':flashUp,'fd':flashDown}">{{ fmtP(price) }}</span>
+  <span class="hdr-chg" :class="change24h>=0?'up':'dn'">{{ change24h>=0?'▲':'▼' }}{{ Math.abs(change24h).toFixed(2) }}%</span>
+  <div class="hdr-div"></div>
+  <div class="hdr-meta">
+    <a href="/history.html?metric=volume_24h" class="hdr-item" style="text-decoration:none;cursor:pointer"><span class="hdr-lbl">24H 成交额 📈</span><span class="hdr-val btc-c">{{ fmtVol(volume24h) }}</span></a>
+    <a href="/history.html?metric=oi_btc" class="hdr-item" style="text-decoration:none;cursor:pointer"><span class="hdr-lbl">OI 持仓 📈</span><span class="hdr-val">{{ fmtOI(oiBtc) }}</span></a>
+    <a href="/history.html?metric=funding_binance" class="hdr-item" style="text-decoration:none;cursor:pointer">
+      <span class="hdr-lbl">Funding 📈</span>
+      <span class="hdr-val" :style="{color:fColor(funding['Binance']||0)}">
+        {{ funding['Binance']!=null?(funding['Binance']>=0?'+':'')+funding['Binance'].toFixed(4)+'%':'--' }}
+      </span>
+    </a>
+    <a href="/history.html?metric=cb_premium" class="hdr-item" style="text-decoration:none;cursor:pointer">
+      <span class="hdr-lbl">CB 溢价 📈</span>
+      <span class="hdr-val" :style="{color:cbPremium>0?'var(--up)':cbPremium<0?'var(--down)':'var(--txt2)'}">
+        {{ cbPremium>=0?'+':'' }}{{ cbPremium.toFixed(1) }}
+      </span>
+    </a>
+    <div class="hdr-item"><span class="hdr-lbl">更新</span><span class="hdr-val dim">{{ lastUpdate }} SGT</span></div>
+  </div>
+  <div class="hdr-actions">
+    <button class="theme-btn" @click="toggleTheme">{{ isDark?'☀️':'🌙' }}</button>
+    <span class="ws-dot" :class="connected?'on':'off'"></span>
+    <span class="ws-txt">{{ connected?'实时':'重连' }}</span>
+  </div>
+</header>
+
+<!-- ══ FUNDING ══════════════════════════════════════════════════ -->
+<div class="card fund-panel">
+  <div class="card-title"><span>💰 Funding Rate</span><span class="ct-sub">5所</span></div>
+  <div v-if="sortedFunding.length">
+    <div class="fund-row" v-for="f in sortedFunding" :key="f.name">
+      <span class="fund-ex">{{ f.name }}</span>
+      <span class="fund-rate" :style="{color:fColor(f.rate)}">{{ f.rate>=0?'+':'' }}{{ f.rate.toFixed(4) }}%</span>
+    </div>
+    <div class="sentiment">
+      <span class="sent-lbl">情绪</span>
+      <span class="sent-val" :style="{color:sentiment.color}">{{ sentiment.text }}</span>
+    </div>
+  </div>
+  <div v-else class="no-data">加载中...</div>
+</div>
+
+<!-- ══ OI PANEL ══════════════════════════════════════════════════ -->
+<div class="card oi-panel">
+  <div class="card-title"><span>📊 Open Interest</span><span class="ct-sub">多时段</span></div>
+  <div class="oi-main">{{ oiBtc?fmtOI(oiBtc):'--' }}</div>
+  <div class="oi-usd">≈ {{ fmtUsd(oiBtc*price) }}</div>
+  <div class="oi-tf-table">
+    <div class="oi-tf-hdr">时间</div><div class="oi-tf-hdr">变化(BTC)</div><div class="oi-tf-hdr" style="text-align:right">%</div>
+    <template v-for="row in oiTFData" :key="row.label">
+      <div class="oi-tf-lbl">{{ row.label }}</div>
+      <div class="oi-tf-val" v-if="row.has">
+        <span style="font-size:9px" :class="row.pct>=0?'up':'dn'">{{ row.pct>=0?'▲':'▼' }}</span>
+        <span :class="row.pct>=0?'up':'dn'">{{ fmtOIVal(row.val) }}</span>
+      </div>
+      <div class="oi-tf-val" v-else><span class="oi-miss">--</span></div>
+      <div class="oi-tf-pct" v-if="row.has" :class="row.pct>=0?'up':'dn'">{{ row.pct>=0?'+':'' }}{{ Math.abs(row.pct).toFixed(2) }}%</div>
+      <div class="oi-tf-pct" v-else><span class="oi-miss">--</span></div>
+    </template>
+  </div>
+</div>
+
+<!-- ══ IB 三大盘口 ══════════════════════════════════════════════ -->
+<div class="card ib-panel">
+  <div class="card-title"><span>📐 三大盘口 IB</span><span class="ct-sub">亚08·欧16·美21</span></div>
+  <svg v-if="ibChart.hasData" :viewBox="'0 0 ' + ibChart.W + ' ' + ibChart.H" class="ib-chart-svg" preserveAspectRatio="xMidYMid meet">
+    <g v-for="(t,i) in ibChart.ticks" :key="'t'+i">
+      <line :x1="ibChart.padL" :x2="ibChart.W-14" :y1="t.y" :y2="t.y" class="ib-axis-line"/>
+      <text :x="ibChart.padL-6" :y="t.y+3" text-anchor="end" class="ib-axis-text">{{ fmtP(t.price) }}</text>
+    </g>
+    <g v-for="bar in ibChart.bars" :key="bar.key">
+      <template v-if="bar.has">
+        <rect :x="bar.x" :y="bar.yHigh" :width="bar.width" :height="bar.h"
+              :fill="bar.color" fill-opacity="0.16" :stroke="bar.color" stroke-width="1.5" rx="3"/>
+        <line :x1="bar.x" :x2="bar.x+bar.width" :y1="bar.yMid" :y2="bar.yMid" :stroke="bar.color" stroke-width="1.4" stroke-dasharray="3,2"/>
+        <text :x="bar.cx" :y="bar.yHigh-5" text-anchor="middle" class="ib-bar-price" :fill="bar.color">{{ fmtP(bar.data.ib_high) }}</text>
+        <text :x="bar.cx" :y="bar.yLow+14" text-anchor="middle" class="ib-bar-price" :fill="bar.color">{{ fmtP(bar.data.ib_low) }}</text>
+        <text :x="bar.cx" :y="ibChart.H-3" text-anchor="middle" class="ib-bar-label">{{ bar.icon }} {{ bar.name }}</text>
+      </template>
+      <template v-else>
+        <text :x="bar.cx" :y="ibChart.H/2" text-anchor="middle" class="ib-bar-label" fill="var(--txt3)">{{ bar.icon }} 待开</text>
+      </template>
+    </g>
+    <g v-if="ibChart.priceY">
+      <line :x1="ibChart.padL" :x2="ibChart.W-14" :y1="ibChart.priceY" :y2="ibChart.priceY" class="ib-current-line"/>
+      <text :x="ibChart.W-16" :y="ibChart.priceY-4" text-anchor="end" class="ib-current-label">{{ fmtP(price) }}</text>
+    </g>
+  </svg>
+  <div v-else class="no-data">IB 数据加载中...</div>
+  <div class="ib-legend">
+    <div class="ib-legend-item" v-for="bar in ibChart.bars" :key="'leg'+bar.key">
+      <span class="ib-legend-name" :style="{color:bar.color}">
+        {{ bar.icon }} {{ bar.name }}
+        <span class="ib-legend-badge" :class="statusBadgeClass(bar.data && bar.data.status)">{{ statusText(bar.data && bar.data.status) }}</span>
+      </span>
+      <span class="ib-legend-range" v-if="bar.has">{{ fmtP(bar.data.ib_range) }} ({{ bar.data.ib_pct!=null?bar.data.ib_pct.toFixed(2):'0.00' }}%)</span>
+    </div>
+  </div>
+  <div class="ib-asia-detail" v-if="ibAsia.opening_type">
+    <div class="ib-ot">{{ ibAsia.opening_type }}</div>
+    <div v-if="ibAsia.obs_high" class="ib-obs-r">
+      <span>H: <b style="color:var(--up)">{{ fmtP(ibAsia.obs_high) }}</b></span>
+      <span>L: <b style="color:var(--down)">{{ fmtP(ibAsia.obs_low) }}</b></span>
+    </div>
+  </div>
+</div>
+
+<!-- ══ VOLUME PROFILE ══════════════════════════════════════════════ -->
+<div class="card vp-panel">
+  <div class="card-title"><span>📊 昨日 Volume Profile</span><span class="ct-sub">{{ vp.date || '' }}</span></div>
+  <div v-if="vpChart.hasData" class="mini-chart-wrap">
+    <svg :viewBox="'0 0 ' + vpChart.W + ' ' + vpChart.H" class="mini-chart-svg" :width="vpChart.W">
+      <rect :x="vpChart.barX" :y="vpChart.yVAH" :width="vpChart.barW" :height="Math.max(vpChart.yVAL-vpChart.yVAH,2)"
+            fill="var(--purple)" fill-opacity="0.16" stroke="var(--purple)" stroke-width="1.5" rx="3"/>
+      <line :x1="vpChart.barX" :x2="vpChart.barX+vpChart.barW" :y1="vpChart.yPOC" :y2="vpChart.yPOC"
+            stroke="var(--purple)" stroke-width="2"/>
+      <line v-if="vpChart.priceY" :x1="vpChart.barX-10" :x2="vpChart.barX+vpChart.barW+10" :y1="vpChart.priceY" :y2="vpChart.priceY"
+            class="ib-current-line"/>
+    </svg>
+    <div class="mini-info">
+      <div class="mini-row"><span class="mini-lbl">VAH</span><span class="mini-val up">{{ fmtP(vp.vah) }}</span></div>
+      <div class="mini-row"><span class="mini-lbl">POC</span><span class="mini-val" style="color:var(--purple)">{{ fmtP(vp.poc) }}</span></div>
+      <div class="mini-row"><span class="mini-lbl">VAL</span><span class="mini-val dn">{{ fmtP(vp.val) }}</span></div>
+      <div class="mini-chips">
+        <span class="mini-chip" v-for="h in (vp.hvn||[])" :key="'h'+h">HVN ${{ fmtP(h) }}</span>
+      </div>
+      <div class="mini-shape">{{ vp.profile_shape || '' }}</div>
+    </div>
+  </div>
+  <div v-else class="no-data">VP 数据加载中...</div>
+</div>
+
+<!-- ══ MARKET PROFILE (昨日 PDH/PDL/PDC) ════════════════════════════ -->
+<div class="card mp-panel">
+  <div class="card-title"><span>📐 昨日 Market Profile</span><span class="ct-sub">PDH·PDL·PDC</span></div>
+  <div v-if="mpChart.hasData" class="mini-chart-wrap">
+    <svg :viewBox="'0 0 ' + mpChart.W + ' ' + mpChart.H" class="mini-chart-svg" :width="mpChart.W">
+      <rect :x="mpChart.barX" :y="mpChart.yHigh" :width="mpChart.barW" :height="Math.max(mpChart.yLow-mpChart.yHigh,2)"
+            fill="var(--accent)" fill-opacity="0.14" stroke="var(--accent)" stroke-width="1.5" rx="3"/>
+      <line :x1="mpChart.barX" :x2="mpChart.barX+mpChart.barW" :y1="mpChart.yClose" :y2="mpChart.yClose"
+            stroke="var(--accent)" stroke-width="2" stroke-dasharray="3,2"/>
+      <line v-if="mpChart.priceY" :x1="mpChart.barX-10" :x2="mpChart.barX+mpChart.barW+10" :y1="mpChart.priceY" :y2="mpChart.priceY"
+            class="ib-current-line"/>
+    </svg>
+    <div class="mini-info">
+      <div class="mini-row"><span class="mini-lbl">PDH</span><span class="mini-val up">{{ fmtP(mp.high) }}</span></div>
+      <div class="mini-row"><span class="mini-lbl">PDC</span><span class="mini-val" style="color:var(--accent)">{{ fmtP(mp.close) }}</span></div>
+      <div class="mini-row"><span class="mini-lbl">PDL</span><span class="mini-val dn">{{ fmtP(mp.low) }}</span></div>
+    </div>
+  </div>
+  <div v-else class="no-data">MP 数据加载中...</div>
+  <div class="mp-position" v-if="mpChart.hasData">{{ mpPositionText }}</div>
+</div>
+
+<!-- ══ ETF 资金流向 ════════════════════════════════════════════════ -->
+<div class="card etf-panel">
+  <div class="card-title"><span>💵 BTC 现货 ETF</span><span class="ct-sub">日/周/月净流量</span></div>
+  <template v-if="etf.has_data">
+    <div class="etf-main-row">
+      <span class="etf-main-val" :class="etf.total_yest>=0?'up':'dn'">{{ etf.yest_str }}</span>
+      <span class="etf-date">{{ etf.date }}{{ etf.freshness||'' }}</span>
+    </div>
+    <div class="etf-src">
+      来源: {{ etf.source }}
+      <span class="etf-cv-badge" v-if="etf.cross_validated">✓双源验证</span>
+      <span v-if="etf.newly_published" style="color:var(--warn)">🆕首发</span>
+    </div>
+    <div class="etf-stats">
+      <div class="etf-stat-item"><span class="etf-stat-lbl">本周</span><span class="etf-stat-val" :class="(etf.total_week||0)>=0?'up':'dn'">{{ etf.week_str }}</span></div>
+      <div class="etf-stat-item"><span class="etf-stat-lbl">本月</span><span class="etf-stat-val" :class="(etf.total_month||0)>=0?'up':'dn'">{{ etf.month_str }}</span></div>
+      <div class="etf-stat-item"><span class="etf-stat-lbl">连续</span><span class="etf-stat-val dim">{{ etf.streak_days }}天{{ etf.streak_dir }}</span></div>
+    </div>
+    <div class="etf-signal">{{ etf.signal }}</div>
+    <div class="etf-top" v-if="etf.top3_lines">{{ etf.top3_lines.split('\n')[0]?.trim() }}</div>
+  </template>
+  <div v-else class="no-data">ETF 数据加载中...</div>
+</div>
+
+<!-- ══ CVD 累积成交量差值 ══════════════════════════════════════════ -->
+<div class="card cvd-panel">
+  <div class="cvd-main">
+    <span class="cvd-lbl">今日 CVD（北京时间08:00起算）</span>
+    <span class="cvd-val" :class="cvdToday>=0?'up':'dn'">
+      {{ cvdToday>=0?'+':'' }}{{ fmtCvd(cvdToday) }}
+    </span>
+  </div>
+  <div class="cvd-div"></div>
+  <div class="cvd-tf-row">
+    <div class="cvd-tf-item" v-for="tf in cvdTfList" :key="tf.label">
+      <span class="cvd-tf-lbl">{{ tf.label }}</span>
+      <span class="cvd-tf-val" :class="tf.val>=0?'up':'dn'">
+        {{ tf.has ? (tf.val>=0?'+':'')+fmtCvd(tf.val) : '--' }}
+      </span>
+    </div>
+  </div>
+  <div class="cvd-div"></div>
+  <span class="cvd-note">净买盘=正(绿) · 净卖盘=负(红) · 数据源:Binance aggTrades</span>
+</div>
+
+<!-- ══ LIQUIDATION ══════════════════════════════════════════════ -->
+<div class="card liq-panel">
+  <div class="card-title"><span>⚡ 清算大单</span><span class="ct-sub">OKX·$1万+·今日{{ liqFeed.length }}笔</span></div>
+  <div class="liq-list">
+    <transition-group name="liq" tag="div" style="display:contents">
+      <div v-for="(liq,i) in liqFeed.slice(0,30)" :key="liq._id" class="liq-row" :class="liq.side==='多爆'?'lng':'sht'">
+        <span class="liq-time">{{ liq.time }}</span>
+        <span class="liq-side">{{ liq.side }}</span>
+        <span class="liq-price">${{ fmtP(liq.price) }}</span>
+        <span class="liq-usd">{{ fmtUsd(liq.usd) }}</span>
+        <span class="liq-ex">{{ liq.exchange }}</span>
+      </div>
+    </transition-group>
+    <div v-if="!liqFeed.length" class="liq-empty"><div>⏳ 等待清算数据</div></div>
+  </div>
+</div>
+
+<!-- ══ STATUS ════════════════════════════════════════════════════ -->
+<div class="card stat-panel">
+  <div class="card-title">🔧 系统 & CB 溢价</div>
+  <div class="cb-box">
+    <div class="cb-title">Coinbase 溢价</div>
+    <div class="cb-val" :style="{color:cbPremium>0?'var(--up)':cbPremium<0?'var(--down)':'var(--txt2)'}">
+      {{ cbPremium>=0?'+':'' }}${{ cbPremium.toFixed(2) }}
+      <span style="font-size:10px;font-weight:400;margin-left:3px">({{ cbPct>=0?'+':'' }}{{ cbPct.toFixed(3) }}%)</span>
+    </div>
+    <div class="cb-note">{{ cbSignal }}</div>
+  </div>
+  <div class="stat-row"><span class="stat-lbl">WebSocket</span><span class="stat-val" :class="connected?'online':'offline'">{{ connected?'●已连接':'○重连中' }}</span></div>
+  <div class="stat-row"><span class="stat-lbl">OKX清算监听</span><span class="stat-val online">●活跃</span></div>
+  <div class="stat-row"><span class="stat-lbl">今日清算笔数</span><span class="stat-val acc">{{ liqFeed.length }}</span></div>
+  <div class="stat-row"><span class="stat-lbl">今日最大单笔</span><span class="stat-val warn">{{ maxLiq }}</span></div>
+  <div class="stat-row"><span class="stat-lbl">在线连接</span><span class="stat-val dim">{{ clientInfo }}</span></div>
+  <div class="stat-note">BTC Dashboard v4.0 · VP/MP/ETF已接入</div>
+</div>
+
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/vue@3.4.21/dist/vue.global.prod.js"></script>
+<script>
+const{createApp,ref,computed,onMounted,onUnmounted}=Vue;
+const TF_ORDER=['5m','15m','30m','1H','4H','12H','24H'];
+
+createApp({
+  setup(){
+    const connected=ref(false),price=ref(0),change24h=ref(0),volume24h=ref(0);
+    const funding=ref({}),oiBtc=ref(0),oiChanges=ref({});
+    const cbPremium=ref(0),cbPct=ref(0);
+    const liqFeed=ref([]),lastUpdate=ref('--:--:--');
+    const flashUp=ref(false),flashDown=ref(false),clientInfo=ref('--');
+    const isDark=ref((localStorage.getItem('btc-theme')||'dark')==='dark');
+    const ibAsia=ref({}),ibEurope=ref({}),ibUs=ref({});
+    const vp=ref({}),mp=ref({}),etf=ref({});
+    const cvdToday=ref(0),cvdChanges=ref({});
+    let liqId=0,ws=null,reconnT=null,hbT=null,healthT=null;
+
+    function applyTheme(){ document.documentElement.className=isDark.value?'':'light'; }
+    function toggleTheme(){ isDark.value=!isDark.value; localStorage.setItem('btc-theme',isDark.value?'dark':'light'); applyTheme(); }
+
+    function connect(){
+      const proto=location.protocol==='https:'?'wss:':'ws:';
+      try{
+        ws=new WebSocket(`${proto}//${location.host}/ws/live`);
+        ws.onopen=()=>{connected.value=true;clearTimeout(reconnT);startHb();};
+        ws.onmessage=({data})=>{
+          try{const m=JSON.parse(data);if(m.type==='snapshot')applySnap(m.data);else if(m.type==='liq')addLiq(m.data);}catch(_){}
+        };
+        ws.onclose=()=>{connected.value=false;clearInterval(hbT);reconnT=setTimeout(connect,3000);};
+        ws.onerror=()=>ws.close();
+      }catch(_){reconnT=setTimeout(connect,5000);}
+    }
+    function startHb(){clearInterval(hbT);hbT=setInterval(()=>{if(ws&&ws.readyState===1)ws.send('ping');},30000);}
+
+    function applySnap(d){
+      const prev=price.value;
+      price.value=d.price??0;change24h.value=d.change_24h??0;volume24h.value=d.volume_24h??0;
+      funding.value=d.funding??{};oiBtc.value=d.oi_btc??0;oiChanges.value=d.oi_changes??{};
+      cbPremium.value=d.cb_premium??0;cbPct.value=d.cb_pct??0;
+      ibAsia.value=d.ib_asia??{};ibEurope.value=d.ib_europe??{};ibUs.value=d.ib_us??{};
+      vp.value=d.vp??{}; mp.value=d.mp??{}; etf.value=d.etf??{};
+      cvdToday.value=d.cvd_today??0; cvdChanges.value=d.cvd_changes??{};
+      lastUpdate.value=d.last_update??'--';
+      if(liqFeed.value.length===0&&d.liq_feed?.length)
+        liqFeed.value=d.liq_feed.map((e,i)=>({...e,_id:`i${i}`}));
+      if(prev&&prev!==price.value){
+        if(price.value>prev){flashUp.value=true;setTimeout(()=>flashUp.value=false,700);}
+        else{flashDown.value=true;setTimeout(()=>flashDown.value=false,700);}
+      }
+    }
+    function addLiq(e){liqId++;liqFeed.value.unshift({...e,_id:`l${liqId}`});if(liqFeed.value.length>100)liqFeed.value.pop();}
+    async function pollHealth(){try{const r=await fetch('/api/health');const d=await r.json();clientInfo.value=`${d.clients} 连接`;}catch(_){}}
+
+    const fmtP=v=>v?Number(v).toLocaleString('en-US',{minimumFractionDigits:1,maximumFractionDigits:1}):'--';
+    const fmtVol=v=>!v?'--':v>=1e9?`$${(v/1e9).toFixed(2)}B`:v>=1e6?`$${(v/1e6).toFixed(0)}M`:`$${v.toFixed(0)}`;
+    const fmtOI=v=>!v?'--':v>=10000?`${(v/10000).toFixed(2)}万BTC`:`${v.toFixed(2)}BTC`;
+    const fmtUsd=v=>!v?'--':v>=1e8?`$${(v/1e8).toFixed(2)}亿`:v>=1e4?`$${Math.round(v/1e4)}万`:`$${Math.round(v).toLocaleString()}`;
+    function fmtOIVal(v){const a=Math.abs(v),s=v>=0?'+':'-';return a>=10000?`${s}${(a/10000).toFixed(2)}万`:a>=1000?`${s}${a.toFixed(0)}`:`${s}${a.toFixed(1)}`;}
+    const fColor=v=>v>0.05?'var(--down)':v>0.02?'var(--warn)':v>0?'#60d4b0':v<-0.01?'var(--up)':'var(--txt2)';
+    function fmtCvd(v){
+      const a=Math.abs(v||0);
+      if(a>=1000)return(a/1000).toFixed(2)+'K BTC';
+      return a.toFixed(2)+' BTC';
+    }
+
+    function statusBadgeClass(s){return s==='complete'?'badge-complete':s==='forming'?'badge-forming':s==='error'?'badge-error':'badge-pending';}
+    function statusText(s){return s==='complete'?'完成':s==='forming'?'形成中':s==='pending'?'待开':'--';}
+
+    const sortedFunding=computed(()=>['Binance','OKX','Bybit','Bitget','Gate']
+      .filter(ex=>funding.value[ex]!=null).map(ex=>({name:ex,rate:funding.value[ex]})));
+
+    const sentiment=computed(()=>{
+      const vals=Object.values(funding.value);if(!vals.length)return{text:'加载中...',color:'var(--txt3)'};
+      const avg=vals.reduce((a,b)=>a+b,0)/vals.length;
+      if(avg>0.05)return{text:'极度偏多⚠️',color:'var(--down)'};
+      if(avg>0.02)return{text:'偏多',color:'var(--warn)'};
+      if(avg>0.005)return{text:'轻度偏多',color:'#60d4b0'};
+      if(avg<-0.02)return{text:'偏空',color:'var(--up)'};
+      if(avg<-0.005)return{text:'轻度偏空',color:'var(--up)'};
+      return{text:'中性',color:'var(--txt2)'};
+    });
+
+    const oiTFData=computed(()=>TF_ORDER.map(tf=>{
+      const d=oiChanges.value[tf];
+      return d?{label:tf,has:true,pct:d.pct,val:d.val}:{label:tf,has:false};
+    }));
+
+    const CVD_TF_ORDER=['5m','15m','30m','1H','4H'];
+    const cvdTfList=computed(()=>CVD_TF_ORDER.map(tf=>{
+      const v=cvdChanges.value[tf];
+      return v!=null?{label:tf,has:true,val:v}:{label:tf,has:false,val:0};
+    }));
+
+    // ═══ IB 三盘口纵向共享轴对比图 ═══
+    const ibChart=computed(()=>{
+      const list=[
+        {key:'asia',   name:'亚盘', icon:'🌏', color:'var(--accent)',
+         data: ibAsia.value && ibAsia.value.ib_high ? {...ibAsia.value, status:'complete'} : ibAsia.value},
+        {key:'europe', name:'欧盘', icon:'🏦', color:'var(--purple)', data:ibEurope.value},
+        {key:'us',     name:'美盘', icon:'🗽', color:'var(--btc)',    data:ibUs.value},
+      ];
+      const valid=list.filter(s=>s.data&&s.data.ib_high&&s.data.ib_low);
+      const W=600,H=180,padL=50,padR=14,padT=12,padB=20;
+      const plotW=W-padL-padR, plotH=H-padT-padB;
+      if(!valid.length) return {W,H,padL,bars:[],ticks:[],priceY:null,hasData:false};
+
+      let maxP=Math.max(...valid.map(s=>s.data.ib_high), price.value||0);
+      let minP=Math.min(...valid.map(s=>s.data.ib_low), price.value||Infinity);
+      if(!isFinite(minP)) minP=Math.min(...valid.map(s=>s.data.ib_low));
+      const pad=Math.max((maxP-minP)*0.15, 30);
+      maxP+=pad; minP-=pad;
+      const range=(maxP-minP)||1;
+      const yFor=p=>padT+plotH*(1-(p-minP)/range);
+
+      const slotW=plotW/3, barW=60;
+      const bars=list.map((s,i)=>{
+        const cx=padL+slotW*i+slotW/2;
+        if(!s.data||!s.data.ib_high) return {...s,has:false,cx,x:cx-barW/2};
+        const yH=yFor(s.data.ib_high), yL=yFor(s.data.ib_low);
+        const yM=yFor(s.data.ib_mid ?? (s.data.ib_high+s.data.ib_low)/2);
+        return {...s,has:true,cx,x:cx-barW/2,width:barW,yHigh:yH,yLow:yL,yMid:yM,h:Math.max(yL-yH,2)};
+      });
+      const ticks=[];
+      for(let i=0;i<=3;i++){ const p=minP+range*i/3; ticks.push({y:yFor(p),price:p}); }
+      const priceY=price.value?yFor(price.value):null;
+      return {W,H,padL,bars,ticks,priceY,hasData:true};
+    });
+
+    // ═══ VP 单柱价格尺 ═══
+    const vpChart=computed(()=>{
+      const W=70,H=100,padT=10,padB=10,barX=15,barW=40;
+      const plotH=H-padT-padB;
+      const d=vp.value;
+      if(!d||!d.has_data) return {W,H,hasData:false};
+      let maxP=Math.max(d.vah, price.value||0);
+      let minP=Math.min(d.val, price.value||Infinity);
+      if(!isFinite(minP)) minP=d.val;
+      const pad=Math.max((maxP-minP)*0.18, 20);
+      maxP+=pad; minP-=pad;
+      const range=(maxP-minP)||1;
+      const yFor=p=>padT+plotH*(1-(p-minP)/range);
+      return {
+        W,H,barX,barW,hasData:true,
+        yVAH:yFor(d.vah), yVAL:yFor(d.val), yPOC:yFor(d.poc),
+        priceY: price.value?yFor(price.value):null,
+      };
+    });
+
+    // ═══ MP 单柱价格尺（昨日PDH/PDL/PDC）═══
+    const mpChart=computed(()=>{
+      const W=70,H=100,padT=10,padB=10,barX=15,barW=40;
+      const plotH=H-padT-padB;
+      const d=mp.value;
+      if(!d||!d.high) return {W,H,hasData:false};
+      let maxP=Math.max(d.high, price.value||0);
+      let minP=Math.min(d.low, price.value||Infinity);
+      if(!isFinite(minP)) minP=d.low;
+      const pad=Math.max((maxP-minP)*0.18, 20);
+      maxP+=pad; minP-=pad;
+      const range=(maxP-minP)||1;
+      const yFor=p=>padT+plotH*(1-(p-minP)/range);
+      return {
+        W,H,barX,barW,hasData:true,
+        yHigh:yFor(d.high), yLow:yFor(d.low), yClose:yFor(d.close),
+        priceY: price.value?yFor(price.value):null,
+      };
+    });
+
+    const mpPositionText=computed(()=>{
+      const d=mp.value; if(!d||!d.high||!price.value) return '';
+      const p=price.value;
+      const distH=(d.high-p), distL=(p-d.low);
+      const vsC=p-d.close;
+      const half = p > (d.high+d.low)/2 ? '上半部' : '下半部';
+      return `现价位于昨日${half}，距PDH $${Math.abs(distH).toFixed(0)}，距PDL $${Math.abs(distL).toFixed(0)}，${vsC>=0?'高于':'低于'}PDC $${Math.abs(vsC).toFixed(0)}`;
+    });
+
+    const cbSignal=computed(()=>{
+      const p=cbPremium.value;
+      if(Math.abs(p)<0.5)return'溢价接近零';
+      if(p>50)return'▲明显溢价：机构买入';
+      if(p>10)return'▲轻度溢价';
+      if(p<-50)return'▼明显折价：机构抛售';
+      if(p<-10)return'▼轻度折价';
+      return`小幅溢价$${Math.abs(p).toFixed(1)}`;
+    });
+
+    const maxLiq=computed(()=>{
+      if(!liqFeed.value.length)return'--';
+      return fmtUsd(Math.max(...liqFeed.value.map(l=>l.usd)));
+    });
+
+    onMounted(()=>{applyTheme();connect();pollHealth();healthT=setInterval(pollHealth,60000);});
+    onUnmounted(()=>{if(ws)ws.close();clearInterval(hbT);clearInterval(healthT);clearTimeout(reconnT);});
+
+    return{
+      connected,price,change24h,volume24h,funding,oiBtc,oiChanges,
+      cbPremium,cbPct,liqFeed,lastUpdate,flashUp,flashDown,clientInfo,isDark,
+      ibAsia,ibEurope,ibUs,ibChart,vp,vpChart,mp,mpChart,mpPositionText,etf,
+      cvdToday,cvdChanges,cvdTfList,
+      sortedFunding,sentiment,oiTFData,cbSignal,maxLiq,
+      fmtP,fmtVol,fmtOI,fmtUsd,fmtOIVal,fmtCvd,fColor,
+      toggleTheme,statusBadgeClass,statusText,
+    };
+  }
+}).mount('#app');
+</script>
+</body>
+</html>

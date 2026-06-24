@@ -1,0 +1,270 @@
+"""
+BTC 现货 ETF 资金流量数据采集
+主数据源：Farside Investors
+备用数据源：SoSoValue
+"""
+import requests
+from bs4 import BeautifulSoup
+from datetime import datetime, timedelta, timezone
+from utils.helpers import setup_logger
+
+logger = setup_logger()
+
+ETF_DISPLAY = {
+    "IBIT": "IBIT(BlackRock)",
+    "FBTC": "FBTC(Fidelity)",
+    "ARKB": "ARKB(ARK)",
+    "BITB": "BITB(Bitwise)",
+    "BTCO": "BTCO(Invesco)",
+    "HODL": "HODL(VanEck)",
+    "GBTC": "GBTC(Grayscale)",
+    "BTC":  "BTC(GrayMini)",
+    "EZBC": "EZBC(Franklin)",
+    "BRRR": "BRRR(Valkyrie)",
+}
+TOP_ETFS = ["IBIT", "FBTC", "ARKB", "BITB", "GBTC"]
+
+FARSIDE_URLS = [
+    "https://farside.co.uk/bitcoin-etf-flow-all-data/",
+    "https://farside.co.uk/btc/",
+    "https://farside.co.uk/bitcoin/btc/",
+]
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://farside.co.uk/",
+}
+
+
+def _parse_val(text: str) -> float:
+    t = text.strip().replace(",", "").replace("$", "").replace("\xa0", "").replace(" ", "")
+    if not t or t in ("-", "—", "–", "", "N/A"):
+        return 0.0
+    negative = (t.startswith("(") and t.endswith(")")) or t.startswith("-")
+    t = t.strip("()-").strip()
+    try:
+        return -float(t) if negative else float(t)
+    except Exception:
+        return 0.0
+
+
+def _fmt_m(val: float) -> str:
+    if abs(val) >= 1000:
+        return f"{val/1000:+.2f}B USD"
+    return f"{val:+.0f}M USD"
+
+
+def _parse_farside_table(html: str) -> list:
+    """解析 Farside HTML 表格"""
+    soup = BeautifulSoup(html, "html.parser")
+    target = None
+    for tbl in soup.find_all("table"):
+        txt = tbl.get_text()
+        if "IBIT" in txt and ("Total" in txt or "total" in txt):
+            target = tbl
+            break
+
+    if not target:
+        return []
+
+    rows = target.find_all("tr")
+    if len(rows) < 2:
+        return []
+
+    # 解析表头
+    col_cells = rows[0].find_all(["th", "td"])
+    col_names = [c.get_text(strip=True) for c in col_cells]
+
+    parsed = []
+    for row in rows[1:]:
+        cells = row.find_all("td")
+        if len(cells) < 3:
+            continue
+
+        date_txt = cells[0].get_text(strip=True)
+        dt = None
+        for fmt in ["%d %b %y", "%d %b %Y", "%b %d, %Y",
+                    "%Y-%m-%d", "%d/%m/%Y", "%d-%b-%y"]:
+            try:
+                dt = datetime.strptime(date_txt, fmt)
+                break
+            except Exception:
+                pass
+        if not dt:
+            continue
+
+        flow = {}
+        for name in list(ETF_DISPLAY.keys()) + ["Total"]:
+            for i, col in enumerate(col_names):
+                if name.upper() == col.upper().strip() and i < len(cells):
+                    flow[name] = _parse_val(cells[i].get_text(strip=True))
+                    break
+
+        if "Total" not in flow or flow["Total"] == 0:
+            flow["Total"] = sum(v for k, v in flow.items() if k != "Total")
+
+        if flow:
+            parsed.append({"date": dt.date(), "flow": flow})
+
+    return sorted(parsed, key=lambda x: x["date"])
+
+
+def _try_farside() -> list:
+    """尝试多个 Farside URL"""
+    for url in FARSIDE_URLS:
+        try:
+            logger.info(f"尝试 Farside URL: {url}")
+            resp = requests.get(url, headers=HEADERS, timeout=20)
+            if resp.status_code == 200:
+                rows = _parse_farside_table(resp.text)
+                if rows:
+                    logger.info(f"Farside 成功: {url}，获取 {len(rows)} 条数据")
+                    return rows
+                else:
+                    logger.warning(f"Farside {url} 返回200但未解析到数据")
+            else:
+                logger.warning(f"Farside {url} 返回 {resp.status_code}")
+        except Exception as e:
+            logger.warning(f"Farside {url} 失败: {e}")
+    return []
+
+
+def _try_sosovalue() -> list:
+    """
+    备用：SoSoValue BTC ETF API
+    返回最近30天数据
+    """
+    try:
+        url = "https://sosovalue.com/api/etf/us-bitcoin-spot"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        if resp.status_code != 200:
+            return []
+
+        data = resp.json()
+        # SoSoValue 返回格式需要适配
+        items = data.get("data", data.get("items", []))
+        if not items:
+            return []
+
+        parsed = []
+        for item in items:
+            try:
+                date_str = item.get("date", item.get("time", ""))
+                dt = datetime.strptime(date_str[:10], "%Y-%m-%d").date()
+                total = float(item.get("totalNetInflow", item.get("net", 0)))
+                ibit  = float(item.get("IBIT", 0))
+                fbtc  = float(item.get("FBTC", 0))
+                arkb  = float(item.get("ARKB", 0))
+                parsed.append({
+                    "date": dt,
+                    "flow": {
+                        "IBIT": ibit, "FBTC": fbtc, "ARKB": arkb,
+                        "Total": total
+                    }
+                })
+            except Exception:
+                continue
+
+        if parsed:
+            logger.info(f"SoSoValue 备用成功，获取 {len(parsed)} 条数据")
+        return sorted(parsed, key=lambda x: x["date"])
+
+    except Exception as e:
+        logger.warning(f"SoSoValue 备用失败: {e}")
+        return []
+
+
+def _build_result(parsed: list) -> dict:
+    """从解析数据构建结果"""
+    today_utc = datetime.now(timezone.utc).date()
+    yesterday  = today_utc - timedelta(days=1)
+
+    latest = None
+    for row in reversed(parsed):
+        if row["date"] <= yesterday:
+            latest = row
+            break
+    if not latest:
+        latest = parsed[-1]
+
+    latest_date  = latest["date"]
+    latest_flow  = latest["flow"]
+    total_yest   = latest_flow.get("Total", 0)
+
+    week_mon = latest_date - timedelta(days=latest_date.weekday())
+    total_week = sum(
+        r["flow"].get("Total", 0) for r in parsed
+        if r["date"] >= week_mon
+    )
+    total_month = sum(
+        r["flow"].get("Total", 0) for r in parsed
+        if r["date"].year == latest_date.year
+        and r["date"].month == latest_date.month
+    )
+
+    streak, streak_dir = 0, ("净流入" if total_yest >= 0 else "净流出")
+    for row in reversed(parsed):
+        val = row["flow"].get("Total", 0)
+        if (val >= 0 and total_yest >= 0) or (val < 0 and total_yest < 0):
+            streak += 1
+        else:
+            break
+
+    top_items = sorted(
+        [(k, latest_flow.get(k, 0)) for k in TOP_ETFS if k in latest_flow],
+        key=lambda x: abs(x[1]), reverse=True
+    )[:3]
+    top3_lines = [
+        f"    {ETF_DISPLAY.get(k,k)}: {_fmt_m(v)}"
+        for k, v in top_items if v != 0
+    ]
+
+    if total_yest > 500:   signal = "重大机构买入（>$500M），强烈利多"
+    elif total_yest > 100: signal = "机构持续配置，多头基本面支撑"
+    elif total_yest > 0:   signal = "小幅净流入，中性偏多"
+    elif total_yest > -100:signal = "小幅净流出，中性偏空"
+    elif total_yest > -500:signal = "机构减仓，做多需谨慎"
+    else:                  signal = "重大机构抛售（>$500M），强烈利空"
+
+    logger.info(
+        f"ETF | {latest_date} | 昨日:{_fmt_m(total_yest)} | "
+        f"连续{streak}天{streak_dir}"
+    )
+
+    return {
+        "has_data":    True,
+        "date":        latest_date.isoformat(),
+        "total_yest":  total_yest,
+        "total_week":  total_week,
+        "total_month": total_month,
+        "streak_days": streak,
+        "streak_dir":  streak_dir,
+        "signal":      signal,
+        "top3_lines":  "\n".join(top3_lines),
+        "yest_str":    _fmt_m(total_yest),
+        "week_str":    _fmt_m(total_week),
+        "month_str":   _fmt_m(total_month),
+    }
+
+
+def fetch_etf_flows() -> dict:
+    """主入口：获取 BTC ETF 资金流量"""
+    # 先试 Farside
+    parsed = _try_farside()
+
+    # Farside 失败则用 SoSoValue
+    if not parsed:
+        logger.info("Farside 全部失败，尝试 SoSoValue 备用...")
+        parsed = _try_sosovalue()
+
+    if not parsed:
+        logger.error("ETF 数据全部来源均不可用")
+        return {"has_data": False}
+
+    return _build_result(parsed)

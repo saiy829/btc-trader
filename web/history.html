@@ -1,0 +1,743 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>历史趋势 · BTC Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+:root {
+  --bg:#04091a;--card:#0b1428;--card2:#0e1a35;
+  --border:#1a2a45;--border2:#243a5e;
+  --txt:#cee0f5;--txt2:#7b9bbf;--txt3:#3d5a80;
+  --up:#00e5cc;--down:#ff3d6e;--warn:#ffb300;--accent:#4d9fff;
+  --btc:#f7931a;--purple:#a78bfa;
+  --font-n:'JetBrains Mono',monospace;--font-u:'Inter',system-ui,sans-serif;
+}
+html.light {
+  --bg:#eef2f8;--card:#ffffff;--card2:#f5f8fe;
+  --border:#ccd8e8;--border2:#a8bcd4;
+  --txt:#18263e;--txt2:#3a5070;--txt3:#7890a8;
+  --up:#007a65;--down:#c8183a;--warn:#cc7800;--accent:#1a6bcc;
+  --btc:#b86000;--purple:#6040b0;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+html,body{min-height:100%;background:var(--bg);color:var(--txt);font-family:var(--font-n);
+  font-size:14px;-webkit-font-smoothing:antialiased;}
+#app{max-width:1400px;margin:0 auto;padding:14px;}
+
+.topbar{display:flex;align-items:center;gap:14px;margin-bottom:14px;padding:12px 16px;
+  background:var(--card);border:1px solid var(--border);border-radius:8px;}
+.back-link{color:var(--accent);text-decoration:none;font-family:var(--font-u);font-size:13px;
+  display:flex;align-items:center;gap:4px;padding:5px 10px;border-radius:5px;border:1px solid var(--border2);}
+.back-link:hover{background:var(--card2);}
+.topbar-title{font-size:16px;font-weight:700;font-family:var(--font-u);}
+.theme-btn{margin-left:auto;background:var(--card2);border:1px solid var(--border2);border-radius:5px;
+  color:var(--txt2);font-size:14px;cursor:pointer;padding:5px 10px;font-family:var(--font-u);}
+
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px;
+  padding:16px;margin-bottom:14px;}
+.card-title{font-size:13px;font-weight:700;font-family:var(--font-u);margin-bottom:12px;
+  display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;}
+
+.metric-tabs{display:flex;gap:6px;flex-wrap:wrap;}
+.tab-btn{padding:6px 14px;border-radius:6px;border:1px solid var(--border2);background:var(--card2);
+  color:var(--txt2);font-size:12px;font-family:var(--font-u);cursor:pointer;transition:all .15s;}
+.tab-btn:hover{background:var(--border);}
+.tab-btn.active{background:var(--accent);color:#fff;border-color:var(--accent);}
+
+.period-tabs{display:flex;gap:6px;}
+.period-btn{padding:5px 12px;border-radius:5px;border:1px solid var(--border2);background:transparent;
+  color:var(--txt3);font-size:11px;font-family:var(--font-u);cursor:pointer;}
+.period-btn.active{background:var(--card2);color:var(--accent);border-color:var(--accent);}
+
+#chart-container{width:100%;}
+.chart-empty{height:400px;display:flex;align-items:center;justify-content:center;color:var(--txt3);font-family:var(--font-u);}
+.combo-pane{width:100%;border-bottom:1px solid var(--border);}
+.combo-pane:last-child{border-bottom:none;}
+.combo-pane-label{font-size:9px;color:var(--txt3);font-family:var(--font-u);
+  text-transform:uppercase;letter-spacing:1px;padding:4px 0 2px 4px;}
+
+.archive-table-wrap{overflow-x:auto;}
+table{width:100%;border-collapse:collapse;font-size:12px;}
+th{text-align:left;padding:8px 10px;color:var(--txt3);font-family:var(--font-u);font-weight:600;
+  text-transform:uppercase;letter-spacing:.5px;font-size:10px;border-bottom:2px solid var(--border);
+  white-space:nowrap;position:sticky;top:0;background:var(--card);}
+td{padding:7px 10px;border-bottom:1px solid var(--border);white-space:nowrap;font-family:var(--font-n);}
+tr:hover td{background:var(--card2);}
+.td-date{color:var(--accent);font-weight:600;}
+.td-up{color:var(--up);}.td-dn{color:var(--down);}.td-dim{color:var(--txt3);}
+.loading{text-align:center;padding:30px;color:var(--txt3);font-family:var(--font-u);}
+@keyframes pulse{0%,100%{opacity:1;}50%{opacity:.3;}}
+
+.fullscreen-btn{background:var(--card2);border:1px solid var(--border2);border-radius:5px;
+  color:var(--txt2);font-size:11px;cursor:pointer;padding:5px 10px;font-family:Inter,sans-serif;
+  display:flex;align-items:center;gap:4px;}
+.fullscreen-btn:hover{background:var(--border);}
+
+#chart-card:fullscreen, #chart-card:-webkit-full-screen{
+  background:var(--bg);padding:20px 24px;display:flex;flex-direction:column;overflow-y:auto;
+}
+#chart-card:fullscreen #chart-container, #chart-card:-webkit-full-screen #chart-container{
+  flex:1;min-height:0;
+}
+
+.pane-sparse-note{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  font-size:10px;color:var(--txt3);font-family:Inter,sans-serif;background:var(--card);z-index:2;}
+.combo-pane{position:relative;}
+</style>
+</head>
+<body>
+<div id="app">
+
+  <div class="topbar">
+    <a href="/" class="back-link">← 返回实时面板</a>
+    <span class="topbar-title">📈 历史趋势分析</span>
+    <span id="auto-refresh-indicator" style="margin-left:auto;font-size:10px;color:var(--txt3);font-family:Inter,sans-serif;">
+      <span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--up);margin-right:4px;animation:pulse 2s infinite;"></span>
+      自动刷新 · 最后更新 <span id="last-refresh-time">--:--:--</span>
+    </span>
+    <button class="theme-btn" onclick="toggleTheme()">🌙</button>
+  </div>
+
+  <div class="card" id="chart-card">
+    <div class="card-title">
+      <div class="metric-tabs" id="metric-tabs"></div>
+      <div style="display:flex;align-items:center;gap:10px;">
+        <div class="period-tabs" id="period-tabs"></div>
+        <button class="fullscreen-btn" onclick="toggleFullscreen()" id="fullscreen-btn">⛶ 全屏</button>
+      </div>
+    </div>
+    <div id="chart-container"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">📅 每日存档（IB / Volume Profile / Market Profile / ETF / 清算）</div>
+    <div class="archive-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>日期</th>
+            <th>亚盘IB H/L</th>
+            <th>开盘类型</th>
+            <th>欧盘IB H/L</th>
+            <th>美盘IB H/L</th>
+            <th>POC</th>
+            <th>VAH/VAL</th>
+            <th>PDH/PDL/PDC</th>
+            <th>ETF净流量</th>
+            <th>清算笔数</th>
+            <th>清算最大单</th>
+          </tr>
+        </thead>
+        <tbody id="archive-tbody">
+          <tr><td colspan="11" class="loading">加载中...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<script>
+function toggleTheme(){
+  const isLight = document.documentElement.className === 'light';
+  document.documentElement.className = isLight ? '' : 'light';
+  localStorage.setItem('btc-theme', isLight ? 'dark' : 'light');
+  if (window.__chart) updateChartTheme();
+}
+
+let isFullscreen = false;
+
+function toggleFullscreen(){
+  const card = document.getElementById('chart-card');
+  if (!document.fullscreenElement){
+    (card.requestFullscreen || card.webkitRequestFullscreen).call(card);
+  } else {
+    (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+  }
+}
+
+document.addEventListener('fullscreenchange', onFsChange);
+document.addEventListener('webkitfullscreenchange', onFsChange);
+function onFsChange(){
+  isFullscreen = !!(document.fullscreenElement || document.webkitFullscreenElement);
+  const btn = document.getElementById('fullscreen-btn');
+  if (btn) btn.textContent = isFullscreen ? '⛶ 退出全屏' : '⛶ 全屏';
+  loadChart();
+}
+document.documentElement.className = (localStorage.getItem('btc-theme')||'dark')==='dark' ? '' : 'light';
+
+const METRICS = [
+  {key:'price',            label:'价格',          fmt:v=>'$'+v.toLocaleString('en-US',{maximumFractionDigits:1})},
+  {key:'volume_24h',       label:'24H成交额',     fmt:v=>'$'+(v/1e9).toFixed(2)+'B'},
+  {key:'oi_btc',           label:'OI持仓',        fmt:v=>(v/10000).toFixed(2)+'万BTC'},
+  {key:'funding_compare',  label:'Funding对比',   isCompare:true},
+  {key:'cb_premium',       label:'CB溢价',        fmt:v=>'$'+v.toFixed(1)},
+  {key:'binance_oi_usd',   label:'OI趋势(亿$)',   isBinance:'oi'},
+  {key:'binance_ls_top',   label:'大户多空比',     isBinance:'ls'},
+];
+const PERIODS = [
+  {key:'1d', label:'今日'}, {key:'7d', label:'本周'},
+  {key:'30d', label:'本月'}, {key:'90d', label:'近3月'}, {key:'all', label:'全部'},
+];
+
+let curMetric = 'price';
+let curPeriod = '7d';
+
+function cssVar(name){ return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+
+// 显式按 UTC+8（北京/新加坡时间）24小时制格式化，不依赖浏览器本地时区设置
+function formatSGT(unixSeconds, withDate){
+  const sgt = new Date((unixSeconds + 8 * 3600) * 1000);
+  const hh = String(sgt.getUTCHours()).padStart(2,'0');
+  const mm = String(sgt.getUTCMinutes()).padStart(2,'0');
+  if (withDate){
+    const mo = String(sgt.getUTCMonth()+1).padStart(2,'0');
+    const da = String(sgt.getUTCDate()).padStart(2,'0');
+    return `${mo}-${da} ${hh}:${mm}`;
+  }
+  return `${hh}:${mm}`;
+}
+
+// ─── FIX 3: CVD 每日 UTC+8 重置 ─────────────────────────────────────────────
+// 每个 UTC+8 日历日以该日第一个数据点的 CVD 值为基准归零，
+// 使每天 CVD 从 0 开始累积，消除多日持续叠加失去参考意义的问题。
+function normalizeCvdByDay(pts) {
+  if (!pts || !pts.length) return pts;
+  // 第一轮：记录每日基准值（UTC+8 日历日的首个 CVD）
+  const baseline = {};
+  pts.forEach(p => {
+    const d = new Date((p.ts + 8 * 3600) * 1000);
+    const key = d.getUTCFullYear() * 10000 + (d.getUTCMonth() + 1) * 100 + d.getUTCDate();
+    if (baseline[key] === undefined) baseline[key] = p.value;
+  });
+  // 第二轮：每个点减去所在日的基准值
+  return pts.map(p => {
+    const d = new Date((p.ts + 8 * 3600) * 1000);
+    const key = d.getUTCFullYear() * 10000 + (d.getUTCMonth() + 1) * 100 + d.getUTCDate();
+    return { ts: p.ts, value: p.value - (baseline[key] ?? 0) };
+  });
+}
+
+// ─── FIX 1: Price Scale 宽度同步 → 时间轴像素级对齐 ─────────────────────────
+// 各子图 Price Scale 标签宽度不同（价格 8 字符 vs Funding 6 字符）
+// 导致内容区宽度不等，时间网格线横坐标产生偏差。
+// 解法：等两帧渲染完毕后读取各图 priceScale.width()，
+// 取最大值统一设为 minimumWidth（LightweightCharts v4.1.0+ 支持）。
+function syncPriceScaleWidths(charts) {
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      try {
+        const widths = charts.map(c => c.priceScale('right').width());
+        const maxW = Math.max(...widths);
+        if (maxW > 0) {
+          charts.forEach(c => c.priceScale('right').applyOptions({ minimumWidth: maxW }));
+        }
+      } catch(e) { console.warn('[pscale-sync]', e); }
+    });
+  });
+}
+
+function buildTabs(){
+  const mt = document.getElementById('metric-tabs');
+  mt.innerHTML = METRICS.map(m =>
+    `<button class="tab-btn ${m.key===curMetric?'active':''}" onclick="selectMetric('${m.key}')">${m.label}</button>`
+  ).join('');
+  const pt = document.getElementById('period-tabs');
+  pt.innerHTML = PERIODS.map(p =>
+    `<button class="period-btn ${p.key===curPeriod?'active':''}" onclick="selectPeriod('${p.key}')">${p.label}</button>`
+  ).join('');
+}
+
+function syncUrl(){
+  const url = new URL(window.location.href);
+  url.searchParams.set('metric', curMetric);
+  history.replaceState(null, '', url.toString());
+}
+function selectMetric(k){ curMetric = k; syncUrl(); buildTabs(); loadChart(); }
+
+// ─── FIX 2: 切换时段时清除已缓存的时间范围 ────────────────────────────────────
+// 根本原因：页面初始以默认 '7d' 加载，fitContent 后 markRefreshed 把 7 日
+// Unix 时间范围写入 window.__savedRange。用户切换到 '今日'(1d) 时，
+// setVisibleRange(__savedRange) 把旧 7 日范围叠加到只有 1 日数据的图表，
+// 图表显示 7 日宽度（大量空白）视觉上等同"切换到本周"，且 markRefreshed
+// 再次保存这个被污染的范围，形成循环。
+// 解法：每次用户主动切换时段时先清空 __savedRange，强制 fitContent 决定初始视图；
+// 自动刷新（同 period）时 __savedRange 保持有效，保留用户的缩放/平移状态。
+function selectPeriod(k){
+  curPeriod = k;
+  window.__savedRange = null;   // 清除跨时段污染
+  buildTabs();
+  loadChart();
+}
+window.selectMetric = selectMetric;
+window.selectPeriod = selectPeriod;
+window.toggleTheme = toggleTheme;
+
+// 时段 → 小时数（供 Binance 新接口使用）
+function periodToHours(p){return{'1d':24,'7d':168,'30d':720,'90d':2160,'all':2160}[p]||24;}
+
+let chart = null, activeSeries = [];
+
+function initChart(){
+  const container = document.getElementById('chart-container');
+  chart = LightweightCharts.createChart(container, {
+    layout: {
+      background: { color: 'transparent' },
+      textColor: cssVar('--txt2'),
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: 11,
+    },
+    grid: {
+      vertLines: { color: cssVar('--border') },
+      horzLines: { color: cssVar('--border') },
+    },
+    rightPriceScale: { borderColor: cssVar('--border2') },
+    timeScale: {
+      borderColor: cssVar('--border2'),
+      timeVisible: true,
+      secondsVisible: false,
+      tickMarkFormatter: (time) => formatSGT(time, false),
+    },
+    localization: {
+      timeFormatter: (time) => formatSGT(time, true) + ' SGT',
+    },
+  });
+  window.__chart = chart;
+  const container2 = container;
+  new ResizeObserver(()=>{
+    chart.applyOptions({ width: container2.clientWidth, height: 400 });
+  }).observe(container2);
+}
+
+function updateChartTheme(){
+  if (!chart) return;
+  chart.applyOptions({
+    layout: { textColor: cssVar('--txt2') },
+    grid: { vertLines:{color:cssVar('--border')}, horzLines:{color:cssVar('--border')} },
+    rightPriceScale: { borderColor: cssVar('--border2') },
+    timeScale: { borderColor: cssVar('--border2') },
+  });
+}
+
+function clearSeries(){
+  activeSeries.forEach(s => { try{ chart.removeSeries(s); }catch(_){} });
+  activeSeries = [];
+  removeAllLegends();
+}
+
+function removeAllLegends(){
+  document.querySelectorAll('#chart-legend, .chart-legend-item').forEach(el => el.remove());
+}
+
+const FUNDING_PRICE_FORMAT = { type:'price', precision:4, minMove:0.0001 };
+
+// ═══ "价格"标签：价格+CVD+OI+Funding 四联动子图 ══════════════════════════════
+let comboCharts = [];
+let comboResizeObs = null;   // FIX 1: 追踪单一 ResizeObserver 引用，防止每次刷新堆积实例
+
+// ─── FIX 1: clearComboCharts 先断开 ResizeObserver 再销毁图表 ────────────────
+function clearComboCharts(){
+  if (comboResizeObs) { comboResizeObs.disconnect(); comboResizeObs = null; }
+  comboCharts.forEach(c => { try{ c.remove(); }catch(_){} });
+  comboCharts = [];
+}
+
+function syncComboCharts(charts){
+  // 时间轴范围联动（按真实时间同步，不按数据点序号）
+  let syncing = false;
+  charts.forEach((chart, i) => {
+    chart.timeScale().subscribeVisibleTimeRangeChange((range) => {
+      if (syncing || range === null) return;
+      syncing = true;
+      try {
+        charts.forEach((other, j) => {
+          if (i !== j) try { other.timeScale().setVisibleRange(range); } catch(_) {}
+        });
+      } finally { syncing = false; }  // 保证异常时 syncing 也能复位
+    });
+  });
+  // 十字光标联动
+  let crosshairSyncing = false;
+  charts.forEach((chart, i) => {
+    chart.subscribeCrosshairMove((param) => {
+      if (crosshairSyncing) return;
+      crosshairSyncing = true;
+      charts.forEach((other, j) => {
+        if (i === j) return;
+        if (!param || !param.time) { other.clearCrosshairPosition(); return; }
+        const s = other.__series;
+        if (s) try { other.setCrosshairPosition(0, param.time, s); } catch(_) {}
+      });
+      crosshairSyncing = false;
+    });
+  });
+}
+
+async function renderCombinedPriceView(period){
+  const container = document.getElementById('chart-container');
+  const hPrice = isFullscreen ? 460 : 200;
+  const hSub   = isFullscreen ? 180 : 90;
+  // FIX 1: Funding 子图（唯一显示时间轴的底部图）需要额外高度补偿时间轴占用的空间，
+  // 使各子图实际内容区高度保持一致
+  const hFund  = hSub + (isFullscreen ? 30 : 24);
+
+  container.innerHTML = `
+    <div class="combo-pane"><div class="combo-pane-label">价格 USD</div><div id="pane-price" style="height:${hPrice}px"></div></div>
+    <div class="combo-pane"><div class="combo-pane-label">CVD 累积成交量差值 (BTC)</div><div id="pane-cvd" style="height:${hSub}px"></div></div>
+    <div class="combo-pane"><div class="combo-pane-label">OI 持仓 (BTC)</div><div id="pane-oi" style="height:${hSub}px"></div></div>
+    <div class="combo-pane"><div class="combo-pane-label">Funding Rate (%)</div><div id="pane-funding" style="height:${hFund}px"></div></div>
+  `;
+
+  const [priceRes, cvdRes, oiRes, fbRes, faRes] = await Promise.all([
+    fetch(`/api/history/metrics?metric=price&period=${period}`).then(r=>r.json()),
+    fetch(`/api/history/metrics?metric=cvd&period=${period}`).then(r=>r.json()),
+    fetch(`/api/history/metrics?metric=oi_btc&period=${period}`).then(r=>r.json()),
+    fetch(`/api/history/metrics?metric=funding_binance&period=${period}`).then(r=>r.json()),
+    fetch(`/api/history/metrics?metric=funding_avg&period=${period}`).then(r=>r.json()),
+  ]);
+
+  if (!priceRes.data || !priceRes.data.length){
+    container.innerHTML = '<div class="chart-empty">暂无数据，快照每5分钟记录一次，请稍后再查看</div>';
+    return;
+  }
+
+  // ─── FIX 1: showTimeScale 参数控制时间轴可见性 ───────────────────────────────
+  // 仅最底部的 Funding 图显示时间轴，其余三图隐藏，消除四套重叠时间标签。
+  // 各图时间轴（即使隐藏）仍处于活跃状态，subscribeVisibleTimeRangeChange
+  // 与 setVisibleRange 的联动逻辑完全不受影响。
+  const baseOpts = (heightPx, showTimeScale = false) => ({
+    height: heightPx,
+    layout: { background:{color:'transparent'}, textColor: cssVar('--txt2'),
+              fontFamily:"'JetBrains Mono', monospace", fontSize: 10 },
+    grid: { vertLines:{color:cssVar('--border')}, horzLines:{color:cssVar('--border')} },
+    rightPriceScale: { borderColor: cssVar('--border2') },
+    timeScale: {
+      visible: showTimeScale,
+      borderColor: cssVar('--border2'),
+      timeVisible: true,
+      secondsVisible: false,
+      tickMarkFormatter: (t)=>formatSGT(t,false),
+    },
+    localization: { timeFormatter: (t)=>formatSGT(t,true)+' SGT' },
+  });
+
+  // 价格图（不显示时间轴）
+  const cPrice = LightweightCharts.createChart(document.getElementById('pane-price'), baseOpts(hPrice, false));
+  const sPrice = cPrice.addAreaSeries({ lineColor:cssVar('--accent'),
+    topColor:'rgba(77,159,255,0.28)', bottomColor:'rgba(77,159,255,0.02)', lineWidth:2 });
+  sPrice.setData(priceRes.data.map(p=>({time:p.ts, value:p.value})));
+  cPrice.__series = sPrice;
+
+  // CVD 图（不显示时间轴）
+  const cvdPts = (cvdRes.data||[]).filter(p=>p.value!=null);
+  if (cvdPts.length < 3){
+    const note = document.createElement('div');
+    note.className = 'pane-sparse-note';
+    note.textContent = '数据积累中，CVD刚接入历史记录，请稍后查看';
+    document.getElementById('pane-cvd').parentNode.appendChild(note);
+  }
+  const cCvd = LightweightCharts.createChart(document.getElementById('pane-cvd'), baseOpts(hSub, false));
+  const sCvd = cCvd.addAreaSeries({
+    lineColor:cssVar('--up'),
+    topColor:'rgba(0,229,204,0.25)', bottomColor:'rgba(0,229,204,0.02)', lineWidth:2,
+    // FIX 3: 禁止 K/M 缩写，使用千分位整数格式（如 1,368 而非 1.368K）
+    priceFormat: {
+      type: 'custom',
+      formatter: v => Math.round(v).toLocaleString('en-US'),
+      minMove: 1,
+    },
+  });
+  // FIX 3: UTC+8 日重置 CVD，每日从 0 开始累积
+  sCvd.setData(normalizeCvdByDay(cvdPts).map(p=>({time:p.ts, value:p.value})));
+  cCvd.__series = sCvd;
+
+  // OI 图（不显示时间轴）
+  const cOi = LightweightCharts.createChart(document.getElementById('pane-oi'), baseOpts(hSub, false));
+  const sOi = cOi.addAreaSeries({ lineColor:cssVar('--purple'),
+    topColor:'rgba(167,139,250,0.25)', bottomColor:'rgba(167,139,250,0.02)', lineWidth:2 });
+  sOi.setData((oiRes.data||[]).map(p=>({time:p.ts, value:p.value})));
+  cOi.__series = sOi;
+
+  // Funding 图（唯一显示时间轴的底部子图，height 用 hFund）
+  const cFund = LightweightCharts.createChart(document.getElementById('pane-funding'), baseOpts(hFund, true));
+  const sFundB = cFund.addLineSeries({ color:cssVar('--accent'), lineWidth:1.5, priceFormat:FUNDING_PRICE_FORMAT });
+  const sFundA = cFund.addLineSeries({ color:cssVar('--warn'),   lineWidth:1.5, priceFormat:FUNDING_PRICE_FORMAT });
+  sFundB.setData((fbRes.data||[]).map(p=>({time:p.ts, value:p.value})));
+  sFundA.setData((faRes.data||[]).map(p=>({time:p.ts, value:p.value})));
+  cFund.__series = sFundB;
+
+  // 先 fitContent（各图独立自适应数据范围），再激活联动
+  [cPrice, cCvd, cOi, cFund].forEach(c => c.timeScale().fitContent());
+
+  // FIX 2: fitContent 之后再恢复已保存的范围（确保正确时序）
+  if (window.__savedRange) {
+    [cPrice, cCvd, cOi, cFund].forEach(c => { try{ c.timeScale().setVisibleRange(window.__savedRange); }catch(_){} });
+  }
+
+  comboCharts = [cPrice, cCvd, cOi, cFund];
+  syncComboCharts(comboCharts);
+  markRefreshed();
+
+  // FIX 1: 对齐各子图 Price Scale 宽度（双 RAF，等首帧渲染完毕再测量）
+  syncPriceScaleWidths(comboCharts);
+
+  // FIX 1: 单一 ResizeObserver，避免每次刷新累积新实例
+  const containerEl = document.getElementById('chart-container');
+  comboResizeObs = new ResizeObserver(() => {
+    const w = containerEl.clientWidth;
+    comboCharts.forEach(c => { try { c.applyOptions({ width: w }); } catch(_) {} });
+    syncPriceScaleWidths(comboCharts);   // 窗口变化后重新同步宽度
+  });
+  comboResizeObs.observe(containerEl);
+
+  removeAllLegends();
+  const legend = document.createElement('div');
+  legend.id = 'chart-legend';
+  legend.style.cssText = 'display:flex;gap:16px;margin-top:8px;padding:0 4px;font-family:Inter,sans-serif;font-size:11px;';
+  legend.innerHTML = `
+    <span style="color:${cssVar('--accent')}">━ 价格 / Binance费率</span>
+    <span style="color:${cssVar('--up')}">━ CVD</span>
+    <span style="color:${cssVar('--purple')}">━ OI持仓</span>
+    <span style="color:${cssVar('--warn')}">━ 5所均值费率</span>`;
+  container.parentNode.insertBefore(legend, container.nextSibling);
+}
+
+// ═══ Binance 新增指标：OI趋势(亿$) / 大户多空比 ══════════════════════════════
+async function loadBinanceChart(type) {
+  const hours = periodToHours(curPeriod);
+  const container = document.getElementById('chart-container');
+  if (!chart) initChart();
+  clearSeries();
+
+  try {
+    if (type === 'oi') {
+      const r = await fetch(`/api/binance/oi/history?hours=${hours}`);
+      const d = await r.json();
+      if (!d.data || !d.data.length) {
+        container.innerHTML = '<div class="chart-empty">暂无 OI 数据（服务运行后约5分钟开始积累）</div>';
+        return;
+      }
+      const s = chart.addAreaSeries({
+        lineColor: cssVar('--up'),
+        topColor: 'rgba(0,229,204,0.22)', bottomColor: 'rgba(0,229,204,0.02)',
+        lineWidth: 2,
+        priceFormat: { type:'custom', formatter: v=>(v/1e8).toFixed(2)+'亿', minMove:1e6 },
+      });
+      s.setData(d.data.map(p => ({ time: p.ts, value: p.oi_usd })));
+      activeSeries = [s];
+      if (window.__savedRange) chart.timeScale().setVisibleRange(window.__savedRange);
+      else chart.timeScale().fitContent();
+      markRefreshed();
+      removeAllLegends();
+      const leg = document.createElement('div');
+      leg.id = 'chart-legend';
+      leg.style.cssText = 'margin-top:8px;font-family:Inter,sans-serif;font-size:11px;';
+      leg.innerHTML = `<span style="color:${cssVar('--up')}">━ OI 持仓量（USD，Binance 5分钟粒度）</span>`;
+      container.parentNode.insertBefore(leg, container.nextSibling);
+
+    } else if (type === 'ls') {
+      const r = await fetch(`/api/binance/ls/history?hours=${hours}`);
+      const d = await r.json();
+      const top = d.top_traders || [], gl = d.global || [];
+      if (!top.length) {
+        container.innerHTML = '<div class="chart-empty">暂无多空比数据（服务运行后约5分钟开始积累）</div>';
+        return;
+      }
+      // 大户多空比
+      const sTop = chart.addLineSeries({
+        color: cssVar('--accent'), lineWidth: 2,
+        priceFormat: { type:'price', precision:3, minMove:0.001 }, title:'大户',
+      });
+      sTop.setData(top.map(p => ({ time: p.ts, value: p.ls_ratio })));
+      // 全市场多空比（参考）
+      const sGl = chart.addLineSeries({
+        color: cssVar('--txt3'), lineWidth: 1,
+        priceFormat: { type:'price', precision:3, minMove:0.001 }, title:'全市场',
+      });
+      sGl.setData(gl.map(p => ({ time: p.ts, value: p.ls_ratio })));
+      // 平衡线 1.0
+      const sMid = chart.addLineSeries({
+        color:'rgba(255,179,0,0.45)', lineWidth:1, lineStyle:2,
+      });
+      if (top.length > 1) sMid.setData([
+        { time: top[0].ts, value: 1.0 },
+        { time: top[top.length-1].ts, value: 1.0 },
+      ]);
+      activeSeries = [sTop, sGl, sMid];
+      if (window.__savedRange) chart.timeScale().setVisibleRange(window.__savedRange);
+      else chart.timeScale().fitContent();
+      markRefreshed();
+      removeAllLegends();
+      const leg = document.createElement('div');
+      leg.id = 'chart-legend';
+      leg.style.cssText = 'margin-top:8px;font-family:Inter,sans-serif;font-size:11px;display:flex;gap:16px;';
+      leg.innerHTML = `
+        <span style="color:${cssVar('--accent')}">━ 大户持仓多空比（Top 20%）</span>
+        <span style="color:${cssVar('--txt3')}">━ 全市场账户多空比</span>
+        <span style="color:rgba(255,179,0,0.7)">-- 平衡线(1.0)</span>`;
+      container.parentNode.insertBefore(leg, container.nextSibling);
+    }
+  } catch(e) {
+    console.error('[binance chart]', e);
+    container.innerHTML = '<div class="chart-empty">数据加载失败</div>';
+  }
+}
+
+async function loadChart(){
+  const m = METRICS.find(x=>x.key===curMetric);
+
+  if (curMetric === 'price'){
+    if (chart){ try{ clearSeries(); chart.remove(); }catch(_){} chart = null; }
+    clearComboCharts();
+    await renderCombinedPriceView(curPeriod);
+    return;
+  }
+
+  clearComboCharts();
+  const container = document.getElementById('chart-container');
+  if (!container.querySelector('canvas') && comboCharts.length === 0) {
+    container.innerHTML = '';
+  }
+
+  if (!chart) initChart();
+  clearSeries();
+
+  // Binance 新增指标（OI趋势/大户多空比），使用独立接口
+  if (m.isBinance) {
+    await loadBinanceChart(m.isBinance);
+    return;
+  }
+
+  if (m.isCompare){
+    try{
+      const [r1, r2] = await Promise.all([
+        fetch(`/api/history/metrics?metric=funding_binance&period=${curPeriod}`).then(r=>r.json()),
+        fetch(`/api/history/metrics?metric=funding_avg&period=${curPeriod}`).then(r=>r.json()),
+      ]);
+      if ((!r1.data||!r1.data.length) && (!r2.data||!r2.data.length)){
+        document.getElementById('chart-container').innerHTML =
+          '<div class="chart-empty">暂无数据，快照每5分钟记录一次，请稍后再查看</div>';
+        return;
+      }
+      const sBinance = chart.addLineSeries({
+        color: cssVar('--accent'), lineWidth: 2, priceFormat: FUNDING_PRICE_FORMAT,
+        title: 'Binance',
+      });
+      const sAvg = chart.addLineSeries({
+        color: cssVar('--warn'), lineWidth: 2, priceFormat: FUNDING_PRICE_FORMAT,
+        title: '5所均值',
+      });
+      sBinance.setData((r1.data||[]).map(p=>({time:p.ts, value:p.value})));
+      sAvg.setData((r2.data||[]).map(p=>({time:p.ts, value:p.value})));
+      activeSeries = [sBinance, sAvg];
+      if (window.__savedRange) chart.timeScale().setVisibleRange(window.__savedRange);
+      else chart.timeScale().fitContent();
+      markRefreshed();
+
+      removeAllLegends();
+      const container = document.getElementById('chart-container');
+      const legend = document.createElement('div');
+      legend.id = 'chart-legend';
+      legend.style.cssText = 'display:flex;gap:16px;margin-top:8px;font-family:Inter,sans-serif;font-size:11px;';
+      legend.innerHTML = `
+        <span style="color:${cssVar('--accent')}">━ Binance</span>
+        <span style="color:${cssVar('--warn')}">━ 5所均值</span>`;
+      container.parentNode.insertBefore(legend, container.nextSibling);
+    }catch(e){ console.error(e); }
+    return;
+  }
+
+  try{
+    const r = await fetch(`/api/history/metrics?metric=${curMetric}&period=${curPeriod}`);
+    const d = await r.json();
+    if (!d.data || !d.data.length){
+      document.getElementById('chart-container').innerHTML =
+        '<div class="chart-empty">暂无数据，快照每5分钟记录一次，请稍后再查看</div>';
+      return;
+    }
+    const s = chart.addAreaSeries({
+      lineColor: cssVar('--accent'),
+      topColor: 'rgba(77,159,255,0.28)',
+      bottomColor: 'rgba(77,159,255,0.02)',
+      lineWidth: 2,
+    });
+    const points = d.data.map(p => ({ time: p.ts, value: p.value }));
+    s.setData(points);
+    activeSeries = [s];
+    if (window.__savedRange) chart.timeScale().setVisibleRange(window.__savedRange);
+    else chart.timeScale().fitContent();
+    markRefreshed();
+  }catch(e){
+    console.error(e);
+  }
+}
+
+function fmtNum(v, digits=1){
+  if (v===null || v===undefined) return '--';
+  return Number(v).toLocaleString('en-US',{minimumFractionDigits:digits,maximumFractionDigits:digits});
+}
+function fmtUsdShort(v){
+  if (v===null||v===undefined) return '--';
+  const a=Math.abs(v), s=v>=0?'+':'-';
+  if (a>=1e8) return s+(a/1e8).toFixed(2)+'亿';
+  if (a>=1e4) return s+Math.round(a/1e4)+'万';
+  return s+Math.round(a).toLocaleString();
+}
+
+async function loadArchive(){
+  try{
+    const r = await fetch('/api/history/daily-archive?days=60');
+    const d = await r.json();
+    const tbody = document.getElementById('archive-tbody');
+    if (!d.data || !d.data.length){
+      tbody.innerHTML = '<tr><td colspan="11" class="loading">暂无归档数据，每日UTC日界后自动归档前一天</td></tr>';
+      return;
+    }
+    tbody.innerHTML = d.data.map(row => `
+      <tr>
+        <td class="td-date">${row.date}</td>
+        <td>${fmtNum(row.ib_asia_high,0)} / ${fmtNum(row.ib_asia_low,0)}</td>
+        <td class="td-dim">${row.ib_asia_type || '--'}</td>
+        <td>${fmtNum(row.ib_europe_high,0)} / ${fmtNum(row.ib_europe_low,0)}</td>
+        <td>${fmtNum(row.ib_us_high,0)} / ${fmtNum(row.ib_us_low,0)}</td>
+        <td style="color:var(--purple)">${fmtNum(row.vp_poc,0)}</td>
+        <td>${fmtNum(row.vp_vah,0)} / ${fmtNum(row.vp_val,0)}</td>
+        <td>${fmtNum(row.mp_high,0)} / ${fmtNum(row.mp_low,0)} / ${fmtNum(row.mp_close,0)}</td>
+        <td class="${(row.etf_flow||0)>=0?'td-up':'td-dn'}">${row.etf_flow!=null?fmtUsdShort(row.etf_flow*1e6):'--'}</td>
+        <td>${row.liq_count ?? '--'}</td>
+        <td class="td-dim">${row.liq_max?fmtUsdShort(row.liq_max):'--'}</td>
+      </tr>
+    `).join('');
+  }catch(e){
+    console.error(e);
+    document.getElementById('archive-tbody').innerHTML =
+      '<tr><td colspan="11" class="loading">加载失败</td></tr>';
+  }
+}
+
+const urlParams = new URLSearchParams(window.location.search);
+const initMetric = urlParams.get('metric');
+if (initMetric && METRICS.some(m=>m.key===initMetric)) curMetric = initMetric;
+
+function markRefreshed(){
+  const t = document.getElementById('last-refresh-time');
+  if (t) t.textContent = formatSGT(Math.floor(Date.now()/1000), false);
+  try{
+    if (comboCharts.length) window.__savedRange = comboCharts[0].timeScale().getVisibleRange();
+    else if (chart) window.__savedRange = chart.timeScale().getVisibleRange();
+  }catch(_){}
+}
+
+buildTabs();
+loadChart();
+loadArchive();
+
+setInterval(() => { loadChart(); }, 60000);
+setInterval(() => { loadArchive(); }, 300000);
+</script>
+</body>
+</html>
