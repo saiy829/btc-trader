@@ -7,7 +7,7 @@
 ## 一、项目概述
 
 BTC USDT 永续合约日内交易 AI 辅助系统
-交易者：Sea（西安鑫易乐电子科技有限公司 GM，同时是 BTC 永续合约交易者）
+交易者：Sea（是 BTC 永续合约交易者）
 交易框架：AMT → Market Profile → Volume Profile → Order Flow
 主交易平台：ATAS（订单流分析软件）
 主要交易标的：Binance USDT永续合约（BTCUSDT）
@@ -18,7 +18,7 @@ AI 模型：Claude claude-sonnet-4-5（Anthropic API）
 
 ## 二、VPS 服务器
 
-服务商：Hetzner（德国法兰克福节点）
+服务商：Hetzner（法兰克福节点）
 规格：4核 / 8GB DDR5 / 256GB NVMe
 系统：Ubuntu 22.04.5 LTS
 项目目录：/opt/btc-trader/
@@ -285,3 +285,276 @@ Claude 阅读后可以立刻接续所有工作，无需重新解释背景。
 
 WordPress文章标题格式：BTC 交易简报 · YYYY-MM-DD HH:MM（无SGT后缀）
 颜色规范：绿涨红跌（西方惯例）
+
+
+
+
+
+
+
+
+
+
+
+# BTC AI 永续合约辅助交易系统
+> GitHub: https://github.com/saiy829/btc-trader
+> VPS: Hetzner 德国法兰克福 | Ubuntu 22.04 | 项目目录: /opt/btc-trader
+> 面板: https://mb.661688.xyz | 简报站: https://jianbao.661688.xyz
+
+---
+
+## 新对话协议
+
+**每次开新对话时，把本文件内容粘贴到开头，然后说明需求。**
+Claude 会直接 fetch GitHub 上的任何文件（仓库已设为 Public）：
+
+```
+我需要看 ai_analyst/briefing.py：
+https://raw.githubusercontent.com/saiy829/btc-trader/main/ai_analyst/briefing.py
+```
+
+**VPS 操作前必做：**
+```bash
+supervisorctl status          # 确认服务状态
+cd /opt/btc-trader && source venv/bin/activate
+```
+
+**代码修改后必做：**
+```bash
+cd /opt/btc-trader
+git add .
+git commit -m "说明改了什么"
+git push
+```
+
+---
+
+## 系统架构
+
+```
+┌─────────────────────────────────────────────────────┐
+│                /opt/btc-trader (VPS)                │
+│                                                     │
+│  8个 Supervisor 服务                                 │
+│  ├─ btc-api              FastAPI 后端 :8001          │
+│  ├─ btc-briefing         简报调度（scheduler.py）     │
+│  ├─ btc-binance-data     Binance数据采集（新增）       │
+│  ├─ btc-structure-monitor 象限+多空比预警（新增）      │
+│  ├─ btc-liq-monitor      OKX爆仓监控                 │
+│  ├─ btc-dom-monitor      大单挂单监控                 │
+│  ├─ btc-funding-monitor  资金费率极端值预警            │
+│  └─ btc-oi-monitor       OI突变预警                  │
+│                                                     │
+│  数据库: /opt/btc-trader/btc_history.db (SQLite)    │
+│  日志:   /opt/btc-trader/logs/                      │
+│  配置:   /opt/btc-trader/.env（不进Git）             │
+└─────────────────────────────────────────────────────┘
+```
+
+---
+
+## 目录结构（完整）
+
+```
+/opt/btc-trader/
+│
+├── scheduler.py              # Telegram Bot + 三时段定时任务调度
+├── daily_briefing.py         # 简报主流程（数据采集→AI分析→发送）
+│
+├── ai_analyst/
+│   └── briefing.py           # Claude prompt构建 + API调用（核心）
+│
+├── alert_bot/
+│   └── send.py               # Telegram消息发送（parse_mode='HTML'）
+│
+├── api/
+│   └── main.py               # FastAPI后端（/api/data、/ws/live、/api/binance/*）
+│
+├── briefing/
+│   └── binance_briefing_data.py  # Binance市场结构数据摘要（供简报注入）【新增】
+│
+├── data_collector/
+│   ├── binance_data.py       # 价格/OI/K线/IB/VP数据采集
+│   ├── multi_funding.py      # 5交所资金费率采集
+│   ├── etf_data.py           # ETF资金流（SoSoValue+Farside双源）
+│   └── cme_data.py           # CME缺口计算
+│
+├── monitor/
+│   ├── liquidation_monitor.py  # OKX WebSocket爆仓监控
+│   ├── funding_monitor.py      # 资金费率极端值预警
+│   ├── oi_monitor.py           # OI突变预警
+│   ├── dom_monitor.py          # 大单挂单监控
+│   ├── binance_data_service.py # Binance数据采集服务（OI/费率/多空比）【新增】
+│   └── structure_monitor.py    # 市场象限+多空比TG预警【新增】
+│
+├── publisher/
+│   └── wordpress.py          # WP-CLI发布到jianbao.661688.xyz
+│
+├── utils/
+│   └── helpers.py            # fmt_time/now_sgt/fmt_usd/setup_logger等工具
+│
+├── web/                      # 同步自 /www/wwwroot/mb.661688.xyz/
+│   ├── index.html            # 主面板（Vue3 CDN，无需构建）
+│   └── history.html          # 历史趋势图（lightweight-charts）
+│
+├── services/                 # 其他辅助服务
+├── data/                     # 数据文件
+├── ai_analyst/               # AI分析模块
+│
+├── .gitignore                # 排除 .env / *.db / logs/ / venv/
+├── requirements.txt
+└── PROJECT_CONTEXT.md        # 本文件
+```
+
+---
+
+## 数据库表（btc_history.db）
+
+### 原有表
+| 表名 | 内容 |
+|------|------|
+| snapshots | 5分钟快照（价格/OI/Funding/CVD/CB溢价）|
+| daily_summary | 每日汇总（IB/VP/MP/ETF/清算统计）|
+
+### 新增表（2026-06 本次改造）
+| 表名 | 内容 | 更新频率 |
+|------|------|----------|
+| binance_oi | OI持仓量（BTC+USD+mark_px）| 每5分钟 |
+| binance_funding | 资金费率+溢价率+下次结算时间 | 每5分钟 |
+| binance_ls_global | 全市场账户多空比 | 每5分钟 |
+| binance_ls_top | 大户持仓多空比（Top 20%）| 每5分钟 |
+| binance_structure | 市场象限快照（Q1/Q2/Q3/Q4/FLAT）| 每5分钟 |
+
+---
+
+## 四象限分析框架
+
+| 象限 | OI | 价格 | 含义 | 信号强度 |
+|------|-----|------|------|----------|
+| Q1 | ↑ | ↑ | 多头新仓·趋势上涨 | 最强做多 |
+| Q2 | ↑ | ↓ | 空头新仓·趋势下跌 | 最强做空 |
+| Q3 | ↓ | ↑ | 空头爆仓·轧空反弹 | 弱多/谨慎 |
+| Q4 | ↓ | ↓ | 多头爆仓·去杠杆 | 弱空/谨慎 |
+| FLAT | - | - | 震荡积累 | 无明显方向 |
+
+---
+
+## API 接口（FastAPI :8001，Nginx反代）
+
+### 原有接口
+- `GET /api/data` → 面板全量数据
+- `GET /api/health` → 健康检查
+- `WS /ws/live` → WebSocket实时推送
+- `GET /api/history/metrics` → 历史快照数据
+
+### 新增接口（2026-06）
+- `GET /api/binance/summary` → OI/费率/多空比/象限最新值
+- `GET /api/binance/oi/history?hours=N` → OI历史时序
+- `GET /api/binance/funding/history?hours=N` → 资金费率历史
+- `GET /api/binance/ls/history?hours=N` → 多空比历史
+- `GET /api/binance/structure?hours=N` → 象限历史
+
+---
+
+## Telegram 预警体系
+
+| 服务 | 触发条件 | 冷却期 |
+|------|----------|--------|
+| btc-liq-monitor | 单笔爆仓 >10万USD / 1小时累计 >100万USD | - |
+| btc-funding-monitor | 资金费率极端值 | - |
+| btc-oi-monitor | OI突变异常 | - |
+| btc-dom-monitor | 大单挂单 >50万USD | - |
+| btc-structure-monitor | Q1/Q2象限确认（连续2次=10分钟稳定）| 60分钟 |
+| btc-structure-monitor | 大户多空比 >3.0 或 <0.5 | 120分钟 |
+
+---
+
+## 简报时间表（北京时间）
+
+| 时段 | 时间 | 会话类型 | 特殊规则 |
+|------|------|----------|----------|
+| 早盘 | 09:30 | morning | 周一升级为 morning_monday（含CME缺口专项）|
+| 欧盘 | 15:00 | europe | 伦敦开盘前 |
+| 美盘 | 20:30 | evening | NY Kill Zone前1小时 |
+| 按需 | /b命令 | ondemand | Telegram随时触发 |
+
+---
+
+## 已知限制（德国IP）
+
+| 服务 | 状态 | 解决方案 |
+|------|------|----------|
+| Binance 期货 WebSocket | 静默封锁 | 用 /fapi/v1/allForceOrders REST（已下线，已放弃）|
+| Binance REST API | ✅ 正常 | 直连，无需代理 |
+| Cloudflare Worker→Binance REST | 403封锁 | 放弃，VPS直连 |
+| Cloudflare Worker→fstream.binance.com | 502封锁 | 放弃 |
+| OKX WebSocket | ✅ 正常 | 主力爆仓数据源 |
+| WordPress REST API | 封锁 | 改用 WP-CLI |
+
+---
+
+## 环境变量结构（.env）
+
+```bash
+# AI
+ANTHROPIC_API_KEY=
+
+# Telegram
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+
+# WordPress
+WP_PATH=/www/wwwroot/jianbao.661688.xyz
+
+# ETF数据
+SOSOVALUE_API_KEY=
+
+# Cloudflare Worker（WebSocket代理，目前未成功）
+BINANCE_WORKER_URL=
+BINANCE_PROXY_KEY=
+
+# 预警阈值
+LIQ_SINGLE_USD=100000
+LIQ_HOURLY_USD=1000000
+DOM_ALERT_USD=500000
+DOM_STRONG_USD=1000000
+DOM_MEGA_USD=5000000
+DOM_PENDING_SEC=15
+DOM_MIN_DIST_PCT=0.5
+```
+
+---
+
+## 变更日志
+
+### 2026-06-24（本次改造）
+- 新增 `monitor/binance_data_service.py`：Binance OI/资金费率/大户多空比5分钟采集
+- 新增 `briefing/binance_briefing_data.py`：市场结构数据摘要（供AI简报使用）
+- 新增 `monitor/structure_monitor.py`：Q1/Q2象限确认+大户极端值TG预警
+- 修改 `ai_analyst/briefing.py`：prompt中加入市场象限数据块，第8节指令更新
+- 修改 `daily_briefing.py`：注入 binance["market_ctx"] 到数据流
+- 修改 `api/main.py`：内联5个 /api/binance/* 接口
+- 修改 `web/history.html`：新增「OI趋势(亿$)」和「大户多空比」图表Tab
+- 新增5个数据库表（binance_oi/funding/ls_global/ls_top/structure）
+- 建立 GitHub 私有仓库 saiy829/btc-trader（后改为Public）
+
+---
+
+## 交易方法论参考
+
+**三层分析框架：**
+1. Context（情境）：月线/周线结构，趋势/盘整/反转区间
+2. Map（地图）：日线 Market Profile + Volume Profile，关键价格区域
+3. Trigger（触发）：盘中 Order Flow（清算/OI/CVD/DOM）确认入场
+
+**关键术语：**
+- IB（Initial Balance）：首60分钟，判断当日波动范围基准
+- POC：成交量最大价格 | VAH/VAL：价值区上下沿
+- HVN/LVN：高/低成交量节点 | PDH/PDL/PDC：前日高低收
+- CME缺口：周末BTC现货与周五CME期货收盘价之差
+- Kill Zone：流动性最强时段（亚洲/伦敦/纽约开盘前后）
+- BSL/SSL：多空双方止损密集区（机构扫流动性目标）
+
+---
+
+*文档生成：2026-06-24 | 下次更新：每次重大改动后 git commit 同步*
