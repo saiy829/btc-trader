@@ -29,7 +29,7 @@ git add . && git commit -m "说明" && git push
 
 **传文件到 VPS（Windows执行）：**
 ```cmd
-scp -P 23456 本地文件 root@91.16.118.7:/opt/btc-trader/目标路径
+scp -P 2** 本地文件 root@*.*.*.*:/opt/btc-trader/目标路径
 ```
 
 ---
