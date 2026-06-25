@@ -2,8 +2,7 @@
 
 ```
 GitHub  : https://github.com/saiy829/btc-trader （Public）
-VPS     : Hetzner 德国法兰克福 | Ubuntu 22.04 LTS
-SSH     : ssh -p 23456 root@91.16.118.7
+VPS     : Hetzne | Ubuntu 22.04 LTS
 项目目录 : /opt/btc-trader/
 Python  : pyenv 管理，venv 在 /opt/btc-trader/venv/
 面板    : https://mb.661688.xyz
