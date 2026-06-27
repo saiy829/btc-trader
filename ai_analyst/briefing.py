@@ -66,20 +66,64 @@ def _etf_block(etf):
 
 
 def _cme_block(cme):
-    if not cme or not cme.get("has_gap"):
-        return "本周无显著 CME 缺口"
-    status = "已填补" if cme["is_filled"] else (
-        f"未填补（需到达 ${cme['gap_bot']:,.0f}-${cme['gap_top']:,.0f}，"
-        f"距 ${cme['dist_to_fill']:,.0f} | {cme['dist_pct']:.2f}%）"
-    )
-    return (
-        f"  缺口方向：{cme['direction']}（{cme['gap_desc']}）\n"
-        f"  缺口区间：${cme['gap_bot']:,.0f} - ${cme['gap_top']:,.0f}"
-        f"（${cme['gap_size']:,.0f} | {cme['gap_pct']:.2f}%）\n"
-        f"  形成时间：{cme['friday_date']}（五）收盘 -> {cme['monday_date']}（一）开盘\n"
-        f"  当前状态：{status}\n"
-        f"  历史规律：约80%的CME缺口最终被填补，可作为价格磁力目标"
-    )
+    """
+    v2：CME 24/7 后的历史缺口追踪格式。
+    2026-05-29 起不再产生新缺口，本函数追踪 3 个历史遗留缺口。
+    """
+    if not cme:
+        return "CME 数据未获取"
+
+    # ── 兼容旧格式（过渡期保护）──────────────────────────────────────
+    if "mode" not in cme:
+        if not cme.get("has_gap"):
+            return "CME 24/7 已上线（2026-05-29），本周无新缺口"
+        return (
+            f"  缺口区间：${cme.get('gap_bot',0):,.0f} - ${cme.get('gap_top',0):,.0f}"
+            f"  状态：{'已填补' if cme.get('is_filled') else '未填补'}"
+        )
+
+    # ── 新版 legacy 追踪模式 ──────────────────────────────────────────
+    if cme.get("all_filled"):
+        return (
+            "【CME 历史缺口追踪·已完成】\n"
+            "  2026-05-29 前形成的 3 个历史遗留缺口已全部填补。\n"
+            "  CME 已切换 24/7 交易，不再产生新周末缺口。\n"
+            "  本分析维度正式退休，后续简报将移除此节。"
+        )
+
+    price   = cme.get("current_price", 0)
+    gaps    = cme.get("gaps", [])
+    unfilled = [g for g in gaps if not g["is_filled"]]
+    filled   = [g for g in gaps if g["is_filled"]]
+    closest  = cme.get("closest_gap")
+
+    lines = [
+        f"【CME 历史缺口追踪】2026-05-29 后不再新增缺口",
+        f"  当前价：${price:,.0f}  未填：{len(unfilled)}/3  已填：{len(filled)}/3",
+        "",
+    ]
+    for g in gaps:
+        if g["is_filled"]:
+            lines.append(f"  缺口{g['id']} {g['name']}（{g['formed']}）：✅ 已填补")
+        else:
+            lines.append(
+                f"  缺口{g['id']} {g['name']}（{g['formed']}）：⬆ 待填补"
+                f"  ${g['gap_bot']:,.0f}-${g['gap_top']:,.0f}"
+                f"  距 +${g['dist_to_fill']:,.0f}（+{g['dist_pct']:.1f}%）"
+            )
+            lines.append(f"     > {g['note']}")
+
+    if closest:
+        lines.extend([
+            "",
+            f"  【最近待填缺口】缺口{closest['id']} {closest['name']}",
+            f"     区间 ${closest['gap_bot']:,.0f}-${closest['gap_top']:,.0f}"
+            f"（宽度 ${closest['size']:,.0f}）",
+            f"     需涨 +{closest['dist_pct']:.1f}%（约 +${closest['dist_to_fill']:,.0f}）",
+            "     历史遗留缺口具备一定磁力，但 24/7 后已非核心信号，",
+            "     优先参考 VP/MP 结构，缺口仅作次级价格目标。",
+        ])
+    return "\n".join(lines)
 
 
 def _sgt_time_fix(text: str) -> str:
@@ -241,14 +285,14 @@ ${ext.get("cb_price",0):,.0f}  溢价：{cb_prem:+.0f} USD  {cb_sig}
         MON_EXTRA = ""
         if session == "morning_monday":
             MON_EXTRA = f"""
-=== 【周一 CME 开盘专项】===
+=== 【周一 结构回顾 & CME 历史缺口追踪】===
 {_cme_block(cme)}
 
-周一 CME 开盘效应提示：
-> 周一 SGT 07:00 CME 开盘，BTC 常出现剧烈跳空或快速波动
-> 开盘后 SGT 07:00-09:00 为高风险窗口（止损扫除频发）
-> 若存在 CME 缺口：缺口方向可作为今日偏向参考，但需 IB 确认
-> 策略：等待开盘初期方向确认后再根据 IB 制定计划
+周一专项提示（CME 24/7 后更新）：
+> ⚠️ 2026-05-29 起 CME 切换 7×24 交易，周一不再有「CME 开盘跳空」效应
+> 周一关注点：周末现货走势的延续/修复，而非 CME 开盘博弈
+> 若上周末出现大幅波动，周一 IB 可能偏宽 → 趋势日概率提升
+> 策略：以 IB 宽度和 PDH/PDL/PDC 结构为核心，忽略 CME 开盘时间节点
 """
 
         return f"""你是专业 BTC 永续合约交易分析师（Binance BTCUSDT），
@@ -277,10 +321,11 @@ ${ext.get("cb_price",0):,.0f}  溢价：{cb_prem:+.0f} USD  {cb_sig}
    结合价格走势，判断ETF资金流向与价格是否同步（背离=警惕信号）
    ETF流向对今日操作的具体影响（加分/减分/中性，一句话）
 
-3.【CME 期货缺口分析】
-   缺口是否构成今日价格磁力目标
-   填补概率与时间判断
-   如无缺口，简短说明
+3.【CME 历史缺口追踪】
+   2026-05-29 CME 已切换 24/7 交易，不再产生新周末缺口
+   报告 3 个历史遗留缺口中尚未填补的数量及最近缺口位置
+   判断最近未填缺口是否在近期走势中具备磁力效应（结合 VP 结构综合判断）
+   若全部已填补，简短说明本节正式退休
 
 4.【今日 IB 分析·开盘类型确认】
    IB 宽度含义（趋势日/平衡日判断）

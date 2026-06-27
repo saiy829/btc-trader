@@ -105,7 +105,7 @@ def run(session: str = "ondemand"):
         logger.info("[3/7] 采集 ETF 资金流量...")
         etf = fetch_etf_flows()
 
-        logger.info("[4/7] 计算 CME 缺口...")
+        logger.info("[4/7] 追踪 CME 历史遗留缺口（24/7 后不再新增）...")
         cme = get_cme_gap()
 
         logger.info("[5/7] 计算今日 IB（60分钟 + 30分钟观察期）...")

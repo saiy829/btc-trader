@@ -90,6 +90,10 @@ async def post_init(application: Application) -> None:
 # ── 主函数 ───────────────────────────────────────────────────────
 
 def main():
+    # ── 启动授权验证（密钥在 .env，不进 GitHub）──────────────────
+    from startup_guard import verify
+    verify()
+    # ─────────────────────────────────────────────────────────────
     logger.info("=" * 50)
     logger.info("BTC AI 调度系统 v3 启动")
     logger.info("早盘：UTC 01:30（SGT 09:30）")
