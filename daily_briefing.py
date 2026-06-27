@@ -1,7 +1,12 @@
 """
-BTC AI 每日简报系统 v7
+BTC AI 每日简报系统 v8
 会话：morning / morning_monday / europe / evening / ondemand
 数据：IB(60min+30min观察) + VP(POC/VAH/VAL) + ETF + CME缺口 + 现货 + CB溢价
+
+v8 新增：
+- TG Header 增加资金费率 Z-score（基于24H历史分位的极端度判断）
+- TG Header 增加三因子市场状态（OI动向×费率极端度×多空拥挤度）
+- 同步更新 binance_briefing_data.get_market_meta() 调用
 """
 from datetime import datetime, timezone
 from utils.helpers import setup_logger, now_sgt
@@ -45,6 +50,24 @@ def build_header(binance, mf, extras, session) -> str:
     arrow   = "UP" if chg > 0 else "DOWN" if chg < 0 else "-"
     sgt     = now_sgt().strftime("%Y-%m-%d %H:%M SGT")
     name    = SESSION_NAMES.get(session, "简报")
+
+    # ── [v8] 从 market_meta 取 Z-score 和市场状态 ─────────────────────────
+    meta        = binance.get("market_meta", {})
+    z           = meta.get("fr_zscore")
+    z_label     = meta.get("fr_zscore_label", "")
+    regime      = meta.get("regime", "")
+    regime_act  = meta.get("regime_action", "")
+
+    # 费率 Z-score 显示（无数据则省略）
+    if z is not None:
+        fr_z_str = f"{z:+.2f}（{z_label}）"
+    else:
+        fr_z_str = "计算中…"
+
+    # 市场状态显示（无数据则省略整行）
+    regime_line = f"市场状态 ：{regime}\n" if regime else ""
+    # ───────────────────────────────────────────────────────────────────────
+
     return (
         f"{'='*36}\n"
         f"BTC {name}\n"
@@ -53,9 +76,11 @@ def build_header(binance, mf, extras, session) -> str:
         f"永续合约 ：${price:,.0f}  {arrow} {chg:+.2f}%\n"
         f"现货价格 ：${spot:,.0f}（{spot_chg:+.2f}%）  基差：{basis:+.0f}\n"
         f"资金费率 ：{fr:+.4f}%  均值：{avg_fr:+.4f}%\n"
+        f"费率Z分  ：{fr_z_str}\n"
         f"24H 成交额：{vol_str}\n"
         f"CB 溢价  ：{cb_prem:+.0f} USD（{cb_sig}）\n"
         f"OI 24H   ：{oi_c:+.2f}%\n"
+        f"{regime_line}"
         f"{'='*36}\n\n"
     )
 
@@ -65,7 +90,7 @@ def run(session: str = "ondemand"):
         session = "morning_monday"
         logger.info("检测到周一，升级为 morning_monday 会话")
     logger.info("=" * 50)
-    logger.info(f"BTC AI 简报 v7 | {SESSION_NAMES.get(session, session)}")
+    logger.info(f"BTC AI 简报 v8 | {SESSION_NAMES.get(session, session)}")
     logger.info("=" * 50)
     try:
         logger.info("[1/7] 采集 Binance 永续 + 现货数据...")
@@ -99,20 +124,26 @@ def run(session: str = "ondemand"):
 
         binance["spot"] = extras
 
-        # ── [新增] Binance 市场结构数据（OI趋势/资金费率/大户多空比/市场象限）────
+        # ── [v8] Binance 市场结构数据（OI趋势/费率/多空比/象限 + Z-score + 状态）──
         # 数据来源：btc_history.db 的 binance_* 表，由 btc-binance-data 服务后台采集
         # try/except 保证：即使本模块失败，简报主流程完全不受影响
         try:
-            from briefing.binance_briefing_data import get_binance_context
-            binance["market_ctx"] = get_binance_context()
+            from briefing.binance_briefing_data import get_binance_context, get_market_meta
+            binance["market_ctx"]  = get_binance_context()
+            binance["market_meta"] = get_market_meta()          # ← v8 新增
             if binance["market_ctx"]:
-                logger.info("      Binance 市场结构数据已载入（OI/费率/多空比/象限）")
+                meta = binance["market_meta"]
+                logger.info(
+                    f"      市场结构数据已载入 | Z={meta.get('fr_zscore','N/A')} "
+                    f"| 状态={meta.get('regime','N/A')}"
+                )
             else:
                 logger.warning("      Binance 市场结构数据为空（btc-binance-data 可能未运行）")
         except Exception as _e:
             logger.warning(f"      Binance 市场结构数据跳过: {_e}")
-            binance["market_ctx"] = ""
-        # ────────────────────────────────────────────────────────────────────────
+            binance["market_ctx"]  = ""
+            binance["market_meta"] = {}                          # ← v8 新增
+        # ───────────────────────────────────────────────────────────────────
 
         logger.info(f"[6/7] Claude AI 分析中 [{session}]...")
         briefing = generate_briefing(binance, mf, ib, etf, cme, vp, session)
