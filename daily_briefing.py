@@ -143,6 +143,18 @@ def run(session: str = "ondemand"):
             logger.warning(f"      Binance 市场结构数据跳过: {_e}")
             binance["market_ctx"]  = ""
             binance["market_meta"] = {}                          # ← v8 新增
+
+        # ATAS 订单流数据（AtasBridge.dll 本地推送，STALE > 30min 自动跳过）
+        try:
+            from briefing.atas_briefing_data import get_atas_context
+            binance["atas_ctx"] = get_atas_context()
+            if binance["atas_ctx"]:
+                logger.info("      ATAS 订单流数据已载入（Delta/CVD/POC/大单）")
+            else:
+                logger.warning("      ATAS 数据为空（AtasBridge 未运行或超时）")
+        except Exception as _atas_e:
+            logger.warning(f"      ATAS 数据跳过: {_atas_e}")
+            binance["atas_ctx"] = ""
         # ───────────────────────────────────────────────────────────────────
 
         logger.info(f"[6/7] Claude AI 分析中 [{session}]...")

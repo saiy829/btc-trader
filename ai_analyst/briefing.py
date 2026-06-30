@@ -15,7 +15,7 @@ logger = setup_logger()
 MAX_TOKENS = {
     "morning":        8192,
     "morning_monday": 8192,
-    "europe":         2500,
+    "europe":         3000,
     "evening":        3000,
     "ondemand":       2000,
 }
@@ -217,6 +217,7 @@ def build_prompt(binance, mf, ib, etf, cme, vp, session):
 
     # ── [新增] Binance 5分钟粒度市场结构数据（OI趋势/费率/多空比/象限）
     market_ctx = binance.get("market_ctx", "")
+    atas_ctx   = binance.get("atas_ctx", "")
 
     price     = p.get("price", 0)
     chg       = p.get("change_pct", 0)
@@ -236,6 +237,10 @@ def build_prompt(binance, mf, ib, etf, cme, vp, session):
 === Binance 市场结构（5分钟粒度实时数据，比上方OI/多空比更精细）===
 {market_ctx}
 """ if market_ctx else ""
+    atas_ctx_block = f"""
+=== ATAS 订单流（本地交易终端 AtasBridge 推送，tick 级精度，比 Binance API 更精确）===
+{atas_ctx}
+""" if atas_ctx else ""
 
     DATA = f"""
 === 价格数据 ===
@@ -262,6 +267,7 @@ OI信号：{_oi_signal(oi_chg, chg)}
 大户：{ls.get("top_long_pct",50):.1f}%多 / {ls.get("top_short_pct",50):.1f}%空
 全账户：{ls.get("global_long_pct",50):.1f}%多 / {ls.get("global_short_pct",50):.1f}%空
 {market_ctx_block}
+{atas_ctx_block}
 === Coinbase 溢价 ===
 ${ext.get("cb_price",0):,.0f}  溢价：{cb_prem:+.0f} USD  {cb_sig}
 （正值=美国机构买入溢价；负值=美国机构抛售折价）
