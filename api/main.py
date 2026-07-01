@@ -105,8 +105,10 @@ def db_insert_snapshot() -> None:
         log.warning(f"db_insert_snapshot error: {e}")
 
 
-def db_insert_daily_archive(date_str: str) -> bool:
-    """归档指定日期（若已存在则跳过）。返回是否新插入。"""
+def db_insert_daily_archive(date_str: str, etf_unavailable: bool = False) -> bool:
+    """归档指定日期（若已存在则跳过）。返回是否新插入。
+    etf_unavailable=True 时 ETF 字段显式存 NULL（ETF 数据游标已经跑过这一天、
+    拿不到准确值了），好过存一个属于别的日期的错误数字。"""
     try:
         conn = sqlite3.connect(DB_PATH, timeout=5)
         existing = conn.execute("SELECT 1 FROM daily_archive WHERE date=?", (date_str,)).fetchone()
@@ -117,6 +119,9 @@ def db_insert_daily_archive(date_str: str) -> bool:
         ib_a, ib_e, ib_u = S["ib_asia"], S["ib_europe"], S["ib_us"]
         vp, mp, etf = S["vp"], S["mp"], S["etf"]
         liq_y = S["liq_yesterday"]
+
+        etf_flow   = None if etf_unavailable else etf.get("total_yest")
+        etf_source = None if etf_unavailable else etf.get("source")
 
         conn.execute(
             "INSERT INTO daily_archive (date, ib_asia_high, ib_asia_low, ib_asia_range, ib_asia_type, "
@@ -130,12 +135,12 @@ def db_insert_daily_archive(date_str: str) -> bool:
              ib_u.get("ib_high"), ib_u.get("ib_low"),
              vp.get("poc"), vp.get("vah"), vp.get("val"), vp.get("profile_shape"),
              mp.get("high"), mp.get("low"), mp.get("close"),
-             etf.get("total_yest"), etf.get("source"),
+             etf_flow, etf_source,
              liq_y.get("count"), liq_y.get("max"), liq_y.get("long_total"), liq_y.get("short_total"))
         )
         conn.commit()
         conn.close()
-        log.info(f"每日归档已写入: {date_str}")
+        log.info(f"每日归档已写入: {date_str}" + ("（ETF数据不可用，留空）" if etf_unavailable else ""))
         return True
     except Exception as e:
         log.warning(f"db_insert_daily_archive error: {e}")
@@ -350,14 +355,28 @@ async def task_snapshot_recorder() -> None:
 
 
 async def task_archive_daily() -> None:
-    """每小时检查并归档昨日数据（VP/MP的date字段代表昨日，凡未归档则补上）"""
+    """每小时检查并归档昨日数据（VP/MP的date字段代表昨日，凡未归档则补上）。
+    ETF数据要到北京时间04:00-12:00更新窗口结束才算"已稳定"（is_settling=False），
+    如果归档这一刻ETF还没轮到target_date、或者还在更新窗口内，本轮先不归档，
+    等下一小时再查——避免把还没对上号/属于别的日期的ETF数值錯误地存进当天归档
+    （这正是之前每日存档表里连续两天ETF数值一模一样的根本原因）。"""
     while True:
         await asyncio.sleep(3600)
-        target_date = S["vp"].get("date") or S["mp"].get("date") if False else None
-        # 优先用 vp.date（昨日），其次 liq_yesterday.date
         target_date = S["vp"].get("date") or S["liq_yesterday"].get("date")
-        if target_date:
+        if not target_date:
+            continue
+
+        etf = S["etf"]
+        etf_date = etf.get("date")
+        if etf_date == target_date and not etf.get("is_settling", False):
             db_insert_daily_archive(target_date)
+        elif etf_date and etf_date > target_date:
+            # ETF游标已经跑过了这一天（比如中间掉线太久没追上），拿不到准确值了，
+            # 归档时ETF字段留空，好过存一个属于别的日期的错误数字
+            log.warning(f"归档 {target_date} 时ETF数据已跑过（当前ETF日期={etf_date}），ETF字段留空")
+            db_insert_daily_archive(target_date, etf_unavailable=True)
+        else:
+            log.info(f"归档暂缓：{target_date} 的ETF数据尚未就绪/未稳定（当前ETF日期={etf_date}），下小时重试")
 
 
 async def task_funding() -> None:
@@ -724,9 +743,18 @@ async def lifespan(_app: FastAPI):
     etf_init = await asyncio.get_event_loop().run_in_executor(None, _load_etf_sync)
     if etf_init: S["etf"] = etf_init
 
-    # 启动时检查是否有遗漏的归档（例如服务刚部署，VP已有数据但今日还没归档过昨日）
+    # 启动时检查是否有遗漏的归档（例如服务刚部署，VP已有数据但今日还没归档过昨日）。
+    # 跟每小时那个任务用同一套ETF就绪判断——避免每次重启服务时，
+    # 用还没轮到/还没稳定的ETF数值把当天归档提前锁死成错误值。
     if S["vp"].get("date"):
-        db_insert_daily_archive(S["vp"]["date"])
+        _boot_target = S["vp"]["date"]
+        _boot_etf = S["etf"]
+        if _boot_etf.get("date") == _boot_target and not _boot_etf.get("is_settling", False):
+            db_insert_daily_archive(_boot_target)
+        elif _boot_etf.get("date") and _boot_etf.get("date") > _boot_target:
+            db_insert_daily_archive(_boot_target, etf_unavailable=True)
+        # 否则（ETF还没轮到/还在更新窗口内）：本轮启动先不归档，
+        # 等 task_archive_daily() 下一个整点自动补上
 
     asyncio.create_task(task_core())
     asyncio.create_task(task_funding())

@@ -255,6 +255,7 @@ function buildTabs(){
 function syncUrl(){
   const url = new URL(window.location.href);
   url.searchParams.set('metric', curMetric);
+  url.searchParams.set('period', curPeriod);
   history.replaceState(null, '', url.toString());
 }
 function selectMetric(k){ curMetric = k; syncUrl(); buildTabs(); loadChart(); }
@@ -270,6 +271,7 @@ function selectMetric(k){ curMetric = k; syncUrl(); buildTabs(); loadChart(); }
 function selectPeriod(k){
   curPeriod = k;
   window.__savedRange = null;   // 清除跨时段污染
+  syncUrl();
   buildTabs();
   loadChart();
 }
@@ -722,6 +724,8 @@ async function loadArchive(){
 const urlParams = new URLSearchParams(window.location.search);
 const initMetric = urlParams.get('metric');
 if (initMetric && METRICS.some(m=>m.key===initMetric)) curMetric = initMetric;
+const initPeriod = urlParams.get('period');
+if (initPeriod && PERIODS.some(p=>p.key===initPeriod)) curPeriod = initPeriod;
 
 function markRefreshed(){
   const t = document.getElementById('last-refresh-time');
