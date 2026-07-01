@@ -151,6 +151,9 @@ html,body{height:100%;background:var(--bg);color:var(--txt);font-family:var(--fo
 .etf-date{font-size:9px;color:var(--txt3);font-family:var(--font-u);}
 .etf-src{font-size:8px;color:var(--txt3);font-family:var(--font-u);margin-bottom:6px;display:flex;align-items:center;gap:4px;}
 .etf-cv-badge{font-size:7px;padding:1px 4px;border-radius:3px;background:rgba(0,229,204,.1);color:var(--up);font-weight:600;}
+.etf-settle{font-size:9px;font-family:var(--font-u);margin-bottom:6px;line-height:1.4;}
+.etf-settle.settling{color:var(--warn);}
+.etf-settle.stable{color:var(--txt3);}
 .etf-stats{display:flex;gap:14px;margin-bottom:6px;}
 .etf-stat-item{display:flex;flex-direction:column;}
 .etf-stat-lbl{font-size:8px;color:var(--txt3);font-family:var(--font-u);text-transform:uppercase;}
@@ -384,6 +387,9 @@ html,body{height:100%;background:var(--bg);color:var(--txt);font-family:var(--fo
       来源: {{ etf.source }}
       <span class="etf-cv-badge" v-if="etf.cross_validated">✓双源验证</span>
       <span v-if="etf.newly_published" style="color:var(--warn)">🆕首发</span>
+    </div>
+    <div class="etf-settle" v-if="etf.completeness_note" :class="etf.is_settling?'settling':'stable'">
+      {{ etf.completeness_note }}
     </div>
     <div class="etf-stats">
       <div class="etf-stat-item"><span class="etf-stat-lbl">本周</span><span class="etf-stat-val" :class="(etf.total_week||0)>=0?'up':'dn'">{{ etf.week_str }}</span></div>

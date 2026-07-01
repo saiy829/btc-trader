@@ -1,10 +1,15 @@
 """
-Claude AI 分析模块 v6
+Claude AI 分析模块 v7
 4种会话：morning / morning_monday / europe / evening / ondemand
 v6 更新：
 - max_tokens 按 session 分级（早盘13节内容多，提高到8192防止截断）
 - IB 相关时间显示统一改为"北京时间/SGT"，不再出现UTC
 - ETF 区块展示数据来源（Farside/SoSoValue）+ 交叉验证状态 + 今日首发标记
+v7 更新：
+- ETF 区块新增"当日更新窗口"状态展示（对应 data_collector/etf_data.py v4 新增字段
+  is_settling / completeness_note），北京时间 04:00-12:00 期间数据标记为阶段性数值，
+  避免早盘简报把未到齐的当日数据当完整信号使用
+- 早盘/欧盘/美盘三节 ETF 相关 prompt 文案同步加入"更新中 vs 已稳定"判断要求
 """
 import anthropic
 from utils.helpers import setup_logger, get_env
@@ -55,9 +60,11 @@ def _etf_block(etf):
     src   = etf.get("source", "-")
     cv    = "（双源交叉验证一致）" if etf.get("cross_validated") else ""
     newly = "🆕 今日首次更新 -> " if etf.get("newly_published") else ""
+    settle = etf.get("completeness_note", "")
     return (
         f"  数据来源：{src}{cv}\n"
         f"  {newly}最新净流量：{etf['yest_str']}（{etf['date']}{fresh}）\n"
+        f"  {settle}\n"
         f"  主要贡献：\n{etf.get('top3_lines','  -')}\n"
         f"  本周累计：{etf['week_str']}  本月累计：{etf['month_str']}\n"
         f"  连续状态：已连续 {etf['streak_days']} 天{etf['streak_dir']}\n"
@@ -323,6 +330,9 @@ ${ext.get("cb_price",0):,.0f}  溢价：{cb_prem:+.0f} USD  {cb_sig}
 2.【BTC 现货 ETF 资金流向解读】
    说明数据来源（Farside/SoSoValue，是否双源交叉验证）、最新净流量数据及其日期
    （若数据滞后请如实说明，不要假设是"昨日"；若标注"今日首次更新"请明确指出这是新到数据）
+   若数据块标注"更新中"（阶段性数值），必须明确说明当前净流量还在陆续披露、
+   不代表当日最终结果，只能作为方向参考，完整数据会在欧盘/美盘简报中确认；
+   若标注"已稳定"，可直接作为当日机构信号使用
    解读本周/本月累计趋势：是机构持续买入还是持续抛售
    结合价格走势，判断ETF资金流向与价格是否同步（背离=警惕信号）
    ETF流向对今日操作的具体影响（加分/减分/中性，一句话）
@@ -421,7 +431,9 @@ IB 数据：${ib.get("ib_low",0):,.0f}-${ib.get("ib_high",0):,.0f} | 类型：{i
    OI 变化（结合5分钟粒度象限数据一句话）
    CB 溢价变化趋势
    三因子市场状态：若相比早盘出现状态切换，重点说明（如从"真实建仓"变为"过热"）
-   若 ETF 数据有更新（数据来源标注"今日首次更新"），在此一并说明
+   若 ETF 数据有更新（数据来源标注"今日首次更新"），在此一并说明；
+   若早盘时数据标注"更新中"、现在已变为"已稳定"，需明确指出数据已确认，
+   并对比早盘的阶段性数值是否有明显变化（可能影响早盘对ETF流向的判断）
 
 4.【欧盘关键触发价位】（2-3个最重要的）
    $价格 -> 突破含义 / 跌破含义
@@ -458,6 +470,8 @@ IB 数据：${ib.get("ib_low",0):,.0f}-${ib.get("ib_high",0):,.0f} | 类型：{i
 2.【ETF 数据与美盘影响】
    最新 ETF 净流量数据（含来源、日期，若标注"今日首次更新"请明确指出这是当天新公布的数据，
    早盘/欧盘时段尚未发布，现在首次纳入分析）对今晚尾盘的潜在影响
+   此时点（SGT 20:30）数据通常已过北京时间12:00的披露窗口，应为"已稳定"状态，
+   可作为当日最终机构信号使用；若数据块仍标注"更新中"（罕见情况），需如实说明并降低该信号权重
    机构资金方向是否与今日价格走势一致
 
 3.【美盘前衍生品状态】

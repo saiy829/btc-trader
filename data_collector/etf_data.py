@@ -1,5 +1,5 @@
 """
-BTC 现货 ETF 资金流量数据采集  v3
+BTC 现货 ETF 资金流量数据采集  v4
 双源：Farside Investors + SoSoValue（官方API，需 SOSOVALUE_API_KEY）
 v3 更新：
 - SoSoValue 改用真实已验证的接口域名 openapi.sosovalue.com（此前猜测的域名是错的）
@@ -8,6 +8,12 @@ v3 更新：
 - 新增"今日首次更新"状态追踪：用本地状态文件记录已播报过的最新日期，
   跨 早盘/欧盘/美盘 session 自动判断是否为"新到数据"，避免重复强调旧数据，
   也确保数据一旦发布，最近的下一次简报会明确标注"今日首次更新"
+v4 更新：
+- 放弃按"到账几只ETF"判断完整性（不同数据源品种清单不一致，coinglass 12家、
+  SoSoValue 13家、Farside 12家互相对不上，按固定清单数数会经常误判）
+- 改为按"当日更新时间窗口"判断：北京时间 04:00（美股收盘）-12:00（各发行商基本披露完）
+  期间的当日最新数据标记为 is_settling=True（阶段性数值），12:00后视为已稳定
+- 新增字段 is_settling / completeness_note，供简报 prompt 和仪表板直接展示
 """
 import os
 import json
@@ -269,6 +275,20 @@ def _build_result(parsed: list, source_note: str, cross_validated: bool) -> dict
     days_old = (today_utc - latest_date).days
     freshness = "" if days_old <= 1 else f"，数据滞后{days_old}天，为最新可获得数据"
 
+    # ── 是否仍在当日更新窗口内 ─────────────────────────────────────────
+    # 规律：美股收盘 UTC+8 04:00，各发行商陆续披露，UTC+8 12:00前后基本到齐。
+    # 04:00-12:00 之间，若这是"最新一期"（freshness为空=数据新鲜），说明还在陆续更新，
+    # Total 是阶段性数值；12:00之后或非新鲜数据视为已稳定。
+    now_bj_ = datetime.now(timezone(timedelta(hours=8)))
+    is_settling = (freshness == "") and (4 <= now_bj_.hour < 12)
+    if is_settling:
+        completeness_note = (
+            "⏳ 当日数据更新中（美股发行商陆续披露，预计北京时间12:00前后到齐），"
+            "当前为阶段性数值，后续可能变化"
+        )
+    else:
+        completeness_note = "✅ 当前为已稳定数据"
+
     # 今日首次更新判断（跨 session 状态追踪）
     state = _load_state()
     last_reported = state.get("last_reported_date", "")
@@ -313,26 +333,28 @@ def _build_result(parsed: list, source_note: str, cross_validated: bool) -> dict
     logger.info(
         f"ETF | 来源:{source_note} | 日期:{latest_date}{freshness} | "
         f"净流量:{_fmt_cny(total_latest)} | 连续{streak}天{streak_dir} | "
-        f"今日首发:{newly_published}"
+        f"今日首发:{newly_published} | 更新窗口:{is_settling}"
     )
 
     return {
-        "has_data":        True,
-        "date":            latest_date.isoformat(),
-        "freshness":       freshness,
-        "source":          source_note,
-        "cross_validated": cross_validated,
-        "newly_published": newly_published,
-        "total_yest":      total_latest,
-        "total_week":      total_week,
-        "total_month":     total_month,
-        "streak_days":     streak,
-        "streak_dir":      streak_dir,
-        "signal":          signal,
-        "top3_lines":      "\n".join(top3_lines),
-        "yest_str":        _fmt_cny(total_latest),
-        "week_str":        _fmt_cny(total_week),
-        "month_str":       _fmt_cny(total_month),
+        "has_data":          True,
+        "date":              latest_date.isoformat(),
+        "freshness":         freshness,
+        "source":            source_note,
+        "cross_validated":   cross_validated,
+        "newly_published":   newly_published,
+        "is_settling":       is_settling,
+        "completeness_note": completeness_note,
+        "total_yest":        total_latest,
+        "total_week":        total_week,
+        "total_month":       total_month,
+        "streak_days":       streak,
+        "streak_dir":        streak_dir,
+        "signal":            signal,
+        "top3_lines":        "\n".join(top3_lines),
+        "yest_str":          _fmt_cny(total_latest),
+        "week_str":          _fmt_cny(total_week),
+        "month_str":         _fmt_cny(total_month),
     }
 
 
