@@ -631,7 +631,7 @@ async def task_okx_liq() -> None:
                         for det in item.get("details",[]):
                             try:
                                 sz,px = float(det.get("sz",0)),float(det.get("bkPx",0))
-                                usd = sz*0.001*px
+                                usd = sz*0.01*px
                                 # 诊断日志：不管金额多小，只要是BTC就记一笔，用来确认OKX到底有没有
                                 # 真的推送过BTC爆仓——跟"usd<10000被过滤掉"和"压根没收到"是两件事
                                 log.info(f"OKX BTC爆仓明细 收到: instId={item.get('instId')} side={det.get('side')} usd=${usd:,.0f}")

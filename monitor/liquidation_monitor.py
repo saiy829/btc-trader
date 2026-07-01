@@ -207,7 +207,7 @@ async def okx_listener():
                                 side  = detail.get("side", "")
                                 sz    = float(detail.get("sz", 0))
                                 price = float(detail.get("bkPx", 0))
-                                usd   = sz * 0.001 * price  # OKX 1张=0.001BTC
+                                usd   = sz * 0.01 * price  # OKX BTCUSDT合约面值=0.01BTC/张（OKX官方资金费率文档确认）
                                 # OKX: buy=空头被清算, sell=多头被清算
                                 direction = "short" if side == "buy" else "long"
                                 await process_liquidation("okx", direction, usd, price)
