@@ -37,8 +37,21 @@ LIQ_HOURLY  = float(get_env("LIQ_HOURLY_USD", "1000000"))
 
 # ── 状态 ─────────────────────────────────────────────────────────
 _window: deque = deque()
-_seen:   set   = set()
+_seen:   set   = set()                    # 已处理过的 order_id 集合
+_seen_order: deque = deque(maxlen=5000)   # 配合 _seen 做有上限的淘汰，不按时间过期
 _last_hourly   = 0.0
+
+
+def _mark_seen(order_id) -> None:
+    """记录 order_id 为已处理，超过上限时淘汰最早的一条（不再按5分钟过期——
+    5分钟过期正是导致同一笔爆仓被重复写入数据库的原因：如果超过5分钟没有更新的
+    爆仓，Gate接口的 from 游标卡住不推进，会把同一条旧记录再送回来一次，
+    过期后的_seen已经忘了这条，就会被当成新记录重复处理。"""
+    if len(_seen_order) >= _seen_order.maxlen:
+        old = _seen_order.popleft()
+        _seen.discard(old)
+    _seen_order.append(order_id)
+    _seen.add(order_id)
 
 
 def _fmt(v: float) -> str:
@@ -66,8 +79,6 @@ def _cleanup():
     cutoff = time.time() - 3600
     while _window and _window[0][0] < cutoff:
         _window.popleft()
-    global _seen
-    _seen = {(t, s) for (t, s) in _seen if t > time.time() - 300}
 
 
 def _total(side: str = "all") -> float:
@@ -77,13 +88,16 @@ def _total(side: str = "all") -> float:
     return sum(v for _, v, d in _window if d == side)
 
 
-def _save_db(rec_time: int, direction: str, fill_price: float, usd_val: float):
-    """写入数据库（供面板读取，表不存在则自动创建）"""
+def _save_db(order_id: int, rec_time: int, direction: str, fill_price: float, usd_val: float):
+    """写入数据库（供面板读取，表不存在则自动创建）。
+    order_id 建唯一索引 + INSERT OR IGNORE：数据库层面兜底防重复，
+    就算内存里的去重万一失效（比如脚本重启丢了_seen），同一笔爆仓也只会存一行。"""
     try:
         conn = sqlite3.connect(DB_PATH, timeout=5)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS gate_liquidations (
                 id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id  INTEGER,
                 ts        INTEGER NOT NULL,
                 direction TEXT NOT NULL,
                 price     REAL NOT NULL,
@@ -91,9 +105,19 @@ def _save_db(rec_time: int, direction: str, fill_price: float, usd_val: float):
                 exchange  TEXT DEFAULT 'Gate'
             )
         """)
+        # 给已存在的旧表补上 order_id 列（新建表已包含，这里兼容老库；已存在则忽略报错）
+        try:
+            conn.execute("ALTER TABLE gate_liquidations ADD COLUMN order_id INTEGER")
+        except sqlite3.OperationalError:
+            pass
         conn.execute(
-            "INSERT INTO gate_liquidations (ts, direction, price, usd_value) VALUES (?,?,?,?)",
-            (rec_time, direction, fill_price, usd_val)
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_gate_liq_order_id "
+            "ON gate_liquidations(order_id)"
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO gate_liquidations "
+            "(order_id, ts, direction, price, usd_value) VALUES (?,?,?,?,?)",
+            (order_id, rec_time, direction, fill_price, usd_val)
         )
         # 只保留最近7天
         cutoff = int(time.time()) - 7 * 86400
@@ -107,17 +131,20 @@ def _save_db(rec_time: int, direction: str, fill_price: float, usd_val: float):
 def _process(record: dict):
     global _last_hourly
 
+    order_id   = record.get("order_id")
     size_raw   = record.get("size", 0)
     fill_price = float(record.get("fill_price", 0))
     rec_time   = record.get("time", 0)
 
     if not size_raw or not fill_price:
         return
-
-    key = (rec_time, size_raw)
-    if key in _seen:
+    if not order_id:
+        logger.warning(f"记录缺少 order_id，跳过（可能是Gate接口格式变化）: {record}")
         return
-    _seen.add(key)
+
+    if order_id in _seen:
+        return
+    _mark_seen(order_id)
 
     size      = abs(int(size_raw))
     usd_val   = size * QUANTO * fill_price
@@ -133,7 +160,7 @@ def _process(record: dict):
 
     # 只保存1万美元以上的爆仓到数据库（过滤小额）
     if usd_val >= 10_000:
-        _save_db(rec_time, direction, fill_price, usd_val)
+        _save_db(order_id, rec_time, direction, fill_price, usd_val)
 
     logger.debug(f"Gate.io {direction} {_fmt(usd_val)} @ ${fill_price:,.0f} ({size}张)")
 

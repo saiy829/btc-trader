@@ -184,7 +184,10 @@ async def binance_listener():
 
 
 async def okx_listener():
-    url = "wss://ws.okx.com/ws/v5/public"
+    # 修正：OKX官方WSS地址必须带 :8443 端口（非标准端口，OKX从2019年就是如此），
+    # 原来这里漏了端口号，wss:// 不带端口默认走443，等于一直没连到OKX真正的服务，
+    # 这是TG完全收不到OKX爆仓推送的根本原因
+    url = "wss://ws.okx.com:8443/ws/v5/public"
     sub = json.dumps({"op": "subscribe", "args": [
         {"channel": "liquidation-orders", "instType": "SWAP"}
     ]})
@@ -196,8 +199,10 @@ async def okx_listener():
                 async for msg in ws:
                     try:
                         d = json.loads(msg)
+                        if d.get("event"): continue  # 订阅确认等事件消息，跳过
                         for item in d.get("data", []):
-                            if item.get("instId", "") != "BTC-USDT-SWAP": continue
+                            # 用 startswith 而不是精确匹配，避免交易对命名变体（如BTC-USD-SWAP）被漏掉
+                            if not item.get("instId", "").startswith("BTC"): continue
                             for detail in item.get("details", []):
                                 side  = detail.get("side", "")
                                 sz    = float(detail.get("sz", 0))
@@ -206,8 +211,8 @@ async def okx_listener():
                                 # OKX: buy=空头被清算, sell=多头被清算
                                 direction = "short" if side == "buy" else "long"
                                 await process_liquidation("okx", direction, usd, price)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"OKX 消息解析失败: {e} | raw={msg[:200]}")
         except Exception as e:
             logger.warning(f"OKX WS 断开: {e}")
         await asyncio.sleep(10)
