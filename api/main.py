@@ -27,6 +27,7 @@ S: dict = {
     "oi_btc": 0.0, "oi_changes": {},
     "cb_premium": 0.0, "cb_pct": 0.0,
     "liq": [],
+    "okx_liq_connected": False, "okx_liq_last_event_ts": 0.0,
     "ib_asia":   {}, "ib_europe": {}, "ib_us": {},
     "vp": {}, "mp": {}, "etf": {},
     "ts": "--:--:--",
@@ -596,11 +597,15 @@ async def task_okx_liq() -> None:
                                           ping_interval=20,ping_timeout=10,close_timeout=5) as ws:
                 await ws.send(sub_msg)
                 log.info("OKX liq WS connected")
+                S["okx_liq_connected"] = True
                 async for raw in ws:
                     try: msg = json.loads(raw)
                     except Exception: continue
                     if msg.get("event"): continue
                     if msg.get("arg",{}).get("channel") != "liquidation-orders": continue
+                    # 只要收到该频道任意一条消息（不论哪个币种、金额多小）就更新"最后收到时间"，
+                    # 这是判断连接真的在收数据、而不只是握手成功的关键信号
+                    S["okx_liq_last_event_ts"] = _time.time()
                     for item in msg.get("data",[]):
                         if not item.get("instId","").startswith("BTC"): continue
                         for det in item.get("details",[]):
@@ -608,23 +613,26 @@ async def task_okx_liq() -> None:
                                 sz,px = float(det.get("sz",0)),float(det.get("bkPx",0))
                                 usd = sz*0.001*px
                                 if usd < 10_000: continue
-                                side_is_long_liq = det.get("side") == "sell"  # sell清算=多头被强平
+                                # OKX含义：side="sell" 是系统强制卖出 = 多头被强平（多爆）
+                                #          side="buy"  是系统强制买入 = 空头被强平（空爆）
                                 e = {"time": datetime.now(SGT).strftime("%H:%M:%S"),
-                                     "side": "多爆" if det.get("side")=="buy" else "空爆",
+                                     "side": "多爆" if det.get("side")=="sell" else "空爆",
                                      "price": round(px,1), "usd": usd, "exchange":"OKX"}
                                 S["liq"].insert(0,e); S["liq"] = S["liq"][:100]
 
                                 _check_liq_day_rollover()
                                 S["liq_daily_count"] += 1
                                 S["liq_daily_max"] = max(S["liq_daily_max"], usd)
-                                if det.get("side") == "buy":
-                                    S["liq_daily_short_total"] += usd
-                                else:
+                                if det.get("side") == "sell":
                                     S["liq_daily_long_total"] += usd
+                                else:
+                                    S["liq_daily_short_total"] += usd
 
                                 await bcast({"type":"liq","data":e})
-                            except Exception: pass
+                            except Exception as e:
+                                log.warning(f"OKX liq detail 解析失败: {e} | raw={det}")
         except Exception as e:
+            S["okx_liq_connected"] = False
             log.warning(f"OKX WS error, retry 5s: {e}")
             await asyncio.sleep(5)
 
@@ -682,7 +690,14 @@ async def get_snapshot(): return snap()
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "clients": len(_clients), "ts": S["ts"]}
+    last_ts = S["okx_liq_last_event_ts"]
+    return {
+        "ok": True, "clients": len(_clients), "ts": S["ts"],
+        "okx_liq": {
+            "connected": S["okx_liq_connected"],
+            "last_event_sec_ago": (_time.time() - last_ts) if last_ts else None,
+        },
+    }
 
 @app.get("/api/history/metrics")
 async def history_metrics(metric: str = "price", period: str = "7d"):
