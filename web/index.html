@@ -180,8 +180,8 @@ html,body{height:100%;background:var(--bg);color:var(--txt);font-family:var(--fo
   scrollbar-color:var(--border) transparent;display:flex;flex-direction:column;gap:2px;min-height:0;}
 .liq-row{display:grid;grid-template-columns:70px 46px 108px 1fr 40px;gap:6px;
   align-items:center;padding:4px 6px;border-radius:3px;font-size:14px;flex-shrink:0;border-left:2px solid transparent;}
-.liq-row.lng{border-left-color:var(--down);background:rgba(255,61,110,.05);}
-.liq-row.sht{border-left-color:var(--up);background:rgba(0,229,204,.04);}
+.liq-row.lng{border-left-color:var(--up);background:rgba(0,229,204,.12);}
+.liq-row.sht{border-left-color:var(--down);background:rgba(255,61,110,.12);}
 .liq-time{color:var(--txt3);font-size:13px;}
 .liq-side{font-size:12px;font-weight:700;padding:1px 4px;border-radius:3px;text-align:center;font-family:var(--font-u);}
 .lng .liq-side{color:var(--down);background:rgba(255,61,110,.15);}
@@ -425,7 +425,7 @@ html,body{height:100%;background:var(--bg);color:var(--txt);font-family:var(--fo
 
 <!-- ══ LIQUIDATION ══════════════════════════════════════════════ -->
 <div class="card liq-panel">
-  <div class="card-title"><span>⚡ 清算大单</span><span class="ct-sub">OKX·$1万+·今日{{ liqFeed.length }}笔</span></div>
+  <div class="card-title"><span>⚡ 清算大单</span><span class="ct-sub">OKX+Gate·$1万+·今日{{ liqFeed.length }}笔</span></div>
   <div class="liq-list">
     <transition-group name="liq" tag="div" style="display:contents">
       <div v-for="(liq,i) in liqFeed.slice(0,30)" :key="liq._id" class="liq-row" :class="liq.side==='多爆'?'lng':'sht'">
@@ -453,6 +453,7 @@ html,body{height:100%;background:var(--bg);color:var(--txt);font-family:var(--fo
   </div>
   <div class="stat-row"><span class="stat-lbl">WebSocket</span><span class="stat-val" :class="connected?'online':'offline'">{{ connected?'●已连接':'○重连中' }}</span></div>
   <div class="stat-row"><span class="stat-lbl">OKX清算监听</span><span class="stat-val" :class="okxLiqClass">{{ okxLiqText }}</span></div>
+  <div class="stat-row"><span class="stat-lbl">Gate清算轮询</span><span class="stat-val" :class="gateLiqClass">{{ gateLiqText }}</span></div>
   <div class="stat-row"><span class="stat-lbl">今日清算笔数</span><span class="stat-val acc">{{ liqFeed.length }}</span></div>
   <div class="stat-row"><span class="stat-lbl">今日最大单笔</span><span class="stat-val warn">{{ maxLiq }}</span></div>
   <div class="stat-row"><span class="stat-lbl">在线连接</span><span class="stat-val dim">{{ clientInfo }}</span></div>
@@ -474,6 +475,7 @@ createApp({
     const liqFeed=ref([]),lastUpdate=ref('--:--:--');
     const flashUp=ref(false),flashDown=ref(false),clientInfo=ref('--');
     const okxLiq=ref({connected:false,last_event_sec_ago:null});
+    const gateLiq=ref({connected:false,last_poll_sec_ago:null});
     const isDark=ref((localStorage.getItem('btc-theme')||'dark')==='dark');
     const ibAsia=ref({}),ibEurope=ref({}),ibUs=ref({});
     const vp=ref({}),mp=ref({}),etf=ref({});
@@ -514,12 +516,12 @@ createApp({
       }
     }
     function addLiq(e){liqId++;liqFeed.value.unshift({...e,_id:`l${liqId}`});if(liqFeed.value.length>100)liqFeed.value.pop();}
-    async function pollHealth(){try{const r=await fetch('/api/health');const d=await r.json();clientInfo.value=`${d.clients} 连接`;if(d.okx_liq)okxLiq.value=d.okx_liq;}catch(_){}}
+    async function pollHealth(){try{const r=await fetch('/api/health');const d=await r.json();clientInfo.value=`${d.clients} 连接`;if(d.okx_liq)okxLiq.value=d.okx_liq;if(d.gate_liq)gateLiq.value=d.gate_liq;}catch(_){}}
 
     const fmtP=v=>v?Number(v).toLocaleString('en-US',{minimumFractionDigits:1,maximumFractionDigits:1}):'--';
     const fmtVol=v=>!v?'--':v>=1e9?`$${(v/1e9).toFixed(2)}B`:v>=1e6?`$${(v/1e6).toFixed(0)}M`:`$${v.toFixed(0)}`;
     const fmtOI=v=>!v?'--':v>=10000?`${(v/10000).toFixed(2)}万BTC`:`${v.toFixed(2)}BTC`;
-    const fmtUsd=v=>!v?'--':v>=1e8?`$${(v/1e8).toFixed(2)}亿`:v>=1e4?`$${Math.round(v/1e4)}万`:`$${Math.round(v).toLocaleString()}`;
+    const fmtUsd=v=>!v?'--':v>=1e8?`$${(v/1e8).toFixed(2)}亿`:v>=1e4?(v/1e4>=100?`$${Math.round(v/1e4)}万`:v/1e4>=10?`$${(v/1e4).toFixed(1)}万`:`$${(v/1e4).toFixed(2)}万`):`$${Math.round(v).toLocaleString()}`;
     function fmtOIVal(v){const a=Math.abs(v),s=v>=0?'+':'-';return a>=10000?`${s}${(a/10000).toFixed(2)}万`:a>=1000?`${s}${a.toFixed(0)}`:`${s}${a.toFixed(1)}`;}
     const fColor=v=>v>0.05?'var(--down)':v>0.02?'var(--warn)':v>0?'#60d4b0':v<-0.01?'var(--up)':'var(--txt2)';
     function fmtCvd(v){
@@ -670,6 +672,21 @@ createApp({
       return'●活跃';
     });
 
+    // Gate清算轮询：只看"轮询本身是否成功"（能不能读到数据库），不看"多久没新爆仓"——
+    // Gate单笔BTC爆仓本来就可能几十分钟才有一次，这是正常现象，不该被当成异常报警
+    const gateLiqClass=computed(()=>{
+      if(!gateLiq.value.connected)return'offline';
+      const ago=gateLiq.value.last_poll_sec_ago;
+      if(ago==null||ago>30)return'warn';
+      return'online';
+    });
+    const gateLiqText=computed(()=>{
+      if(!gateLiq.value.connected)return'○轮询异常';
+      const ago=gateLiq.value.last_poll_sec_ago;
+      if(ago==null||ago>30)return'⚠️轮询已停滞';
+      return'●轮询中';
+    });
+
     onMounted(()=>{applyTheme();connect();pollHealth();healthT=setInterval(pollHealth,60000);});
     onUnmounted(()=>{if(ws)ws.close();clearInterval(hbT);clearInterval(healthT);clearTimeout(reconnT);});
 
@@ -679,7 +696,7 @@ createApp({
       ibAsia,ibEurope,ibUs,ibChart,vp,vpChart,mp,mpChart,mpPositionText,etf,
       cvdToday,cvdChanges,cvdTfList,
       sortedFunding,sentiment,oiTFData,cbSignal,maxLiq,
-      okxLiqText,okxLiqClass,
+      okxLiqText,okxLiqClass,gateLiqText,gateLiqClass,
       fmtP,fmtVol,fmtOI,fmtUsd,fmtOIVal,fmtCvd,fColor,
       toggleTheme,statusBadgeClass,statusText,
     };
