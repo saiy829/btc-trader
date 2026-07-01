@@ -178,17 +178,17 @@ html,body{height:100%;background:var(--bg);color:var(--txt);font-family:var(--fo
 .liq-panel{grid-area:liq;}
 .liq-list{flex:1;overflow-y:auto;overflow-x:hidden;scrollbar-width:thin;
   scrollbar-color:var(--border) transparent;display:flex;flex-direction:column;gap:2px;min-height:0;}
-.liq-row{display:grid;grid-template-columns:70px 46px 108px 1fr 40px;gap:6px;
+.liq-row{display:grid;grid-template-columns:70px 92px 108px 1fr 40px;gap:6px;
   align-items:center;padding:4px 6px;border-radius:3px;font-size:14px;flex-shrink:0;border-left:2px solid transparent;}
 .liq-row.lng{border-left-color:var(--up);background:rgba(0,229,204,.12);}
 .liq-row.sht{border-left-color:var(--down);background:rgba(255,61,110,.12);}
 .liq-time{color:var(--txt3);font-size:13px;}
-.liq-side{font-size:12px;font-weight:700;padding:1px 4px;border-radius:3px;text-align:center;font-family:var(--font-u);}
-.lng .liq-side{color:var(--down);background:rgba(255,61,110,.15);}
-.sht .liq-side{color:var(--up);background:rgba(0,229,204,.12);}
+.liq-side{font-size:12px;font-weight:700;padding:1px 4px;border-radius:3px;text-align:center;font-family:var(--font-u);white-space:nowrap;}
+.lng .liq-side{color:var(--up);background:rgba(0,229,204,.18);}
+.sht .liq-side{color:var(--down);background:rgba(255,61,110,.18);}
 .liq-price{color:var(--txt3);font-size:13px;}
 .liq-usd{font-size:15px;font-weight:700;}
-.lng .liq-usd{color:var(--down);}.sht .liq-usd{color:var(--up);}
+.lng .liq-usd{color:var(--up);}.sht .liq-usd{color:var(--down);}
 .liq-ex{font-size:12px;color:var(--txt3);text-align:right;font-family:var(--font-u);}
 .liq-empty{color:var(--txt3);font-family:var(--font-u);font-size:14px;text-align:center;margin:auto;line-height:2;}
 .liq-enter-active{transition:all .28s ease;}.liq-enter-from{opacity:0;transform:translateX(10px);}
@@ -428,9 +428,9 @@ html,body{height:100%;background:var(--bg);color:var(--txt);font-family:var(--fo
   <div class="card-title"><span>⚡ 清算大单</span><span class="ct-sub">OKX+Gate·$1万+·今日{{ liqFeed.length }}笔</span></div>
   <div class="liq-list">
     <transition-group name="liq" tag="div" style="display:contents">
-      <div v-for="(liq,i) in liqFeed.slice(0,30)" :key="liq._id" class="liq-row" :class="liq.side==='多爆'?'lng':'sht'">
+      <div v-for="(liq,i) in liqFeed.slice(0,30)" :key="liq._id" class="liq-row" :class="liq.side==='多头爆仓'?'lng':'sht'">
         <span class="liq-time">{{ liq.time }}</span>
-        <span class="liq-side">{{ liq.side }}</span>
+        <span class="liq-side">{{ liq.side }} {{ liq.side==='空头爆仓'?'↑':'↓' }}</span>
         <span class="liq-price">${{ fmtP(liq.price) }}</span>
         <span class="liq-usd">{{ fmtUsd(liq.usd) }}</span>
         <span class="liq-ex">{{ liq.exchange }}</span>

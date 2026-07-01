@@ -28,6 +28,7 @@ S: dict = {
     "cb_premium": 0.0, "cb_pct": 0.0,
     "liq": [],
     "okx_liq_connected": False, "okx_liq_last_event_ts": 0.0,
+    "gate_liq_connected": False, "gate_liq_last_poll_ts": 0.0, "gate_liq_last_id": 0,
     "ib_asia":   {}, "ib_europe": {}, "ib_us": {},
     "vp": {}, "mp": {}, "etf": {},
     "ts": "--:--:--",
@@ -612,11 +613,14 @@ async def task_okx_liq() -> None:
                             try:
                                 sz,px = float(det.get("sz",0)),float(det.get("bkPx",0))
                                 usd = sz*0.001*px
+                                # 诊断日志：不管金额多小，只要是BTC就记一笔，用来确认OKX到底有没有
+                                # 真的推送过BTC爆仓——跟"usd<10000被过滤掉"和"压根没收到"是两件事
+                                log.info(f"OKX BTC爆仓明细 收到: instId={item.get('instId')} side={det.get('side')} usd=${usd:,.0f}")
                                 if usd < 10_000: continue
                                 # OKX含义：side="sell" 是系统强制卖出 = 多头被强平（多爆）
                                 #          side="buy"  是系统强制买入 = 空头被强平（空爆）
                                 e = {"time": datetime.now(SGT).strftime("%H:%M:%S"),
-                                     "side": "多爆" if det.get("side")=="sell" else "空爆",
+                                     "side": "多头爆仓" if det.get("side")=="sell" else "空头爆仓",
                                      "price": round(px,1), "usd": usd, "exchange":"OKX"}
                                 S["liq"].insert(0,e); S["liq"] = S["liq"][:100]
 
@@ -635,6 +639,65 @@ async def task_okx_liq() -> None:
             S["okx_liq_connected"] = False
             log.warning(f"OKX WS error, retry 5s: {e}")
             await asyncio.sleep(5)
+
+
+# ── Gate.io 爆仓：不重复连 Gate API，直接读 gate_liq_monitor.py（btc-gate-liq
+#    服务）已经在写的 gate_liquidations 表，跟 OKX 合并进同一份 S["liq"] 列表 ──
+def _poll_gate_liq_sync(after_id: int) -> list:
+    """同步查询：取 id > after_id 的新爆仓记录，按 id 升序返回"""
+    try:
+        con = sqlite3.connect("/opt/btc-trader/btc_history.db", timeout=5)
+        cur = con.cursor()
+        cur.execute(
+            "SELECT id, ts, direction, price, usd_value FROM gate_liquidations "
+            "WHERE id > ? ORDER BY id ASC LIMIT 200",
+            (after_id,)
+        )
+        rows = cur.fetchall()
+        con.close()
+        return rows
+    except Exception as e:
+        log.warning(f"Gate liq DB 查询失败: {e}")
+        return []
+
+
+async def task_gate_liq() -> None:
+    # 启动时先定位到当前最大 id，避免把历史存量数据一次性灌进今日面板
+    try:
+        init_rows = await asyncio.get_event_loop().run_in_executor(
+            None, _poll_gate_liq_sync, -1)
+        S["gate_liq_last_id"] = init_rows[-1][0] if init_rows else 0
+    except Exception:
+        S["gate_liq_last_id"] = 0
+
+    while True:
+        try:
+            rows = await asyncio.get_event_loop().run_in_executor(
+                None, _poll_gate_liq_sync, S.get("gate_liq_last_id", 0))
+            # 只要这次查询没抛异常就算"轮询健康"——跟"有没有新爆仓事件"是两回事，
+            # Gate上BTC单笔爆仓本来就可能几十分钟都没有一次，不能拿"多久没新事件"当异常
+            S["gate_liq_connected"] = True
+            S["gate_liq_last_poll_ts"] = _time.time()
+            for row_id, ts, direction, price, usd in rows:
+                S["gate_liq_last_id"] = row_id
+                e = {"time": datetime.fromtimestamp(ts, SGT).strftime("%H:%M:%S"),
+                     "side": direction,
+                     "price": round(price, 1), "usd": usd, "exchange": "Gate"}
+                S["liq"].insert(0, e); S["liq"] = S["liq"][:100]
+
+                _check_liq_day_rollover()
+                S["liq_daily_count"] += 1
+                S["liq_daily_max"] = max(S["liq_daily_max"], usd)
+                if direction == "多头爆仓":
+                    S["liq_daily_long_total"] += usd
+                else:
+                    S["liq_daily_short_total"] += usd
+
+                await bcast({"type": "liq", "data": e})
+        except Exception as e:
+            S["gate_liq_connected"] = False
+            log.warning(f"Gate liq 轮询异常: {e}")
+        await asyncio.sleep(3)
 
 
 @asynccontextmanager
@@ -673,6 +736,7 @@ async def lifespan(_app: FastAPI):
     asyncio.create_task(task_mp())
     asyncio.create_task(task_etf())
     asyncio.create_task(task_okx_liq())
+    asyncio.create_task(task_gate_liq())
     asyncio.create_task(task_cvd())
     asyncio.create_task(task_snapshot_recorder())
     asyncio.create_task(task_archive_daily())
@@ -690,12 +754,17 @@ async def get_snapshot(): return snap()
 
 @app.get("/api/health")
 async def health():
-    last_ts = S["okx_liq_last_event_ts"]
+    okx_ts  = S["okx_liq_last_event_ts"]
+    gate_ts = S["gate_liq_last_poll_ts"]
     return {
         "ok": True, "clients": len(_clients), "ts": S["ts"],
         "okx_liq": {
             "connected": S["okx_liq_connected"],
-            "last_event_sec_ago": (_time.time() - last_ts) if last_ts else None,
+            "last_event_sec_ago": (_time.time() - okx_ts) if okx_ts else None,
+        },
+        "gate_liq": {
+            "connected": S["gate_liq_connected"],
+            "last_poll_sec_ago": (_time.time() - gate_ts) if gate_ts else None,
         },
     }
 
