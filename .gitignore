@@ -14,3 +14,4 @@ __pycache__/
 *.pyc
 venv/
 config_local.py
+*.bak_*
