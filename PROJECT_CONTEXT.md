@@ -1,340 +1,574 @@
-# BTC AI 永续合约辅助交易系统 · 项目全局文档
-
-```
-GitHub  : https://github.com/saiy829/btc-trader （Public）
-VPS     : Hetzne | Ubuntu 22.04 LTS
-项目目录 : /opt/btc-trader/
-Python  : pyenv 管理，venv 在 /opt/btc-trader/venv/
-面板    : https://mb.661688.xyz
-简报站  : https://jianbao.661688.xyz
-```
+# BTC AI 永续合约辅助交易系统 · 完整项目文档 v2
+> 更新日期：2026-06-27 · 新对话直接粘贴本文档即可快速上下文同步
 
 ---
 
-## 一、新对话协议（必读）
+## 一、项目基础信息
 
-**每次开新对话，把本文档内容粘贴到开头，然后说明需求。**
+| 项目 | 信息 |
+|---|---|
+| GitHub 仓库 | https://github.com/saiy829/btc-trader （**公开**） |
+| VPS 服务商 | Hetzner，Ubuntu 22.04 LTS，德国法兰克福 |
+| VPS Hostname | `206507`（root@206507） |
+| 项目目录 | `/opt/btc-trader/` |
+| Python 环境 | pyenv 管理，venv 在 `/opt/btc-trader/venv/` |
+| 实时面板 | https://mb.661688.xyz |
+| 简报站（WP） | https://jianbao.661688.xyz |
+| 交易品种 | Binance BTCUSDT 永续合约 |
+| 时区约定 | 所有显示时间以 **北京时间 UTC+8（SGT）** 为准 |
 
-Claude 会直接 fetch GitHub 上任何文件：
-```
-https://github.com/saiy829/btc-trader/blob/main/ai_analyst/briefing.py
-```
+---
 
-**VPS 常用命令：**
+## 二、快速上下文协议（新对话必读）
+
+### Claude 读取 GitHub 文件方法：
 ```bash
-cd /opt/btc-trader && source venv/bin/activate
-supervisorctl status
-git add . && git commit -m "说明" && git push
+# 直接 curl 原始内容（在 Claude 沙盒内运行）
+curl -s "https://raw.githubusercontent.com/saiy829/btc-trader/main/文件路径"
 ```
 
-**传文件到 VPS（Windows执行）：**
-```cmd
-scp -P 2** 本地文件 root@*.*.*.*:/opt/btc-trader/目标路径
+### VPS 常用命令：
+```bash
+# 进入项目目录
+cd /opt/btc-trader
+
+# 用 venv Python 运行（不能用系统 python3）
+venv/bin/python3 脚本.py
+
+# 查看所有服务状态
+supervisorctl status
+
+# 重启单个服务
+supervisorctl restart btc-briefing
+
+# 查看日志
+tail -50 logs/scheduler.log
+tail -50 logs/daily-briefing.log
+
+# 手动触发简报（测试）
+venv/bin/python3 -c "from daily_briefing import run; run('ondemand')"
 ```
+
+### 传文件到 VPS（Windows PowerShell）：
+```cmd
+scp 本地文件 root@VPS_IP:/opt/btc-trader/目标路径
+```
+
+### ⚠️ 重要：GitHub 与 VPS 的同步关系
+- **git_sync.sh** 每天北京时间 03:00 自动将 VPS 改动推送到 GitHub
+- 白天手动部署到 VPS 的文件，要等次日凌晨才出现在 GitHub
+- 因此 GitHub 上的代码可能比 VPS 滞后最多 24 小时
+- **新对话读 GitHub 文件后，务必询问用户"今天是否有新部署"**
+
+### VPS 上的一次性脚本存放位置：
+- `/root/btc-deploy/` — 所有已执行完毕的补丁/部署脚本
+- `/opt/btc-trader/` — 只放正式项目文件
 
 ---
 
-## 二、系统架构总览
+## 三、系统架构总览
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    /opt/btc-trader/                         │
-│                                                             │
-│  8个 Supervisor 托管服务：                                   │
-│  btc-briefing          scheduler.py                         │
-│  btc-api               api/main.py  :8001                   │
-│  btc-binance-data      monitor/binance_data_service.py      │
-│  btc-structure-monitor monitor/structure_monitor.py         │
-│  btc-liq-monitor       monitor/liquidation_monitor.py       │
-│  btc-dom-monitor       monitor/dom_monitor.py               │
-│  btc-funding-monitor   monitor/funding_monitor.py           │
-│  btc-oi-monitor        monitor/oi_monitor.py                │
-│                                                             │
-│  数据库 : /opt/btc-trader/btc_history.db (SQLite)          │
-│  日志   : /opt/btc-trader/logs/                            │
-│  配置   : /opt/btc-trader/.env  ← 不进 Git！               │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                    /opt/btc-trader/                             │
+│                                                                 │
+│  8 个 Supervisor 托管服务（持续运行）：                           │
+│                                                                 │
+│  btc-briefing          scheduler.py          Telegram Bot+定时  │
+│  btc-api               api/main.py :8001     实时面板后端        │
+│  btc-binance-data      services/btc_binance_data_service.py     │
+│                                              5分钟采集→SQLite    │
+│  btc-structure-monitor monitor/structure_monitor.py             │
+│                                              象限+多空比预警     │
+│  btc-liq-monitor       monitor/liquidation_monitor.py           │
+│                                              OKX WS 清算监控    │
+│  btc-dom-monitor       monitor/dom_monitor.py  DOM深度监控      │
+│  btc-funding-monitor   monitor/funding_monitor.py 费率预警      │
+│  btc-oi-monitor        monitor/oi_monitor.py   OI异动预警       │
+│                                                                 │
+│  数据库：/opt/btc-trader/btc_history.db  （SQLite）             │
+│  日志：  /opt/btc-trader/logs/                                  │
+│  配置：  /opt/btc-trader/.env   ← 绝不进 Git！含所有密钥        │
+│  临时脚本：/root/btc-deploy/    ← 已执行的一次性脚本             │
+└─────────────────────────────────────────────────────────────────┘
 
 数据流向：
-  Binance REST API ──→ data_collector/* + monitor/binance_data_service
-  OKX WebSocket ────→ monitor/liquidation_monitor
-  SoSoValue+Farside→ data_collector/etf_data
-  btc_history.db ──→ api/main.py → mb.661688.xyz
-  所有数据 → AI Prompt → Claude API → Telegram + WordPress
+  Binance REST/WS ─────→ data_collector/* + btc_binance_data_service
+  OKX WebSocket ────────→ liquidation_monitor（Binance WS 德国IP被封）
+  SoSoValue + Farside ──→ data_collector/etf_data
+  SQLite（btc_history.db）→ briefing/binance_briefing_data.py → AI Prompt
+  所有数据 → AI Prompt → Claude API → Telegram Bot + WordPress
 ```
 
 ---
 
-## 三、完整目录结构
+## 四、完整目录结构
 
 ```
 /opt/btc-trader/
 │
-├── scheduler.py              ★ 系统入口
-│                               Telegram Bot + 三时段定时任务
-│                               命令：/b 立即简报 / /status 系统状态
-│                               定时：UTC 01:30(早盘) / 07:00(欧盘) / 12:30(美盘)
+├── scheduler.py              ★ 系统主入口（Supervisor 管理）
+│                               Telegram Bot + 定时任务
 │
-├── daily_briefing.py         ★ 简报主流程（v7）
-│                               7步骤：数据采集→市场结构→AI分析→TG+WP发布
-│                               会话类型：morning/morning_monday/europe/evening/ondemand
+├── daily_briefing.py         ★ 简报主流程 v8
+│
+├── startup_guard.py          ★ 启动授权验证（2026-06-27 新增）
+│                               密钥+hostname 双重验证，防止代码被他人运行
+│
+├── git_sync.sh               ★ VPS→GitHub 每日自动同步
+│                               cron 每天北京时间 03:00 运行
 │
 ├── ai_analyst/
-│   └── briefing.py           ★ Claude AI 核心（v6）
-│                               build_prompt()：构建4种会话的完整提示词
-│                               generate_briefing()：调用 Anthropic API
-│                               MODEL: claude-sonnet-4-5
-│                               MAX_TOKENS: 早盘8192/欧盘2500/美盘3000/按需2000
-│
-├── alert_bot/
-│   └── send.py               Telegram 消息发送
-│                               parse_mode='HTML'（重要，不能改）
-│
-├── api/
-│   └── main.py               FastAPI 后端（端口 8001）
-│                               /api/data         面板全量数据
-│                               /api/health       健康检查
-│                               /ws/live          WebSocket实时推送
-│                               /api/history/metrics  历史快照
-│                               /api/binance/*    Binance新增接口（内联）
+│   ├── briefing.py           ★ Claude AI Prompt 构建 v6
+│   └── liq_briefing.py       大额清算 AI 分析 Prompt
 │
 ├── briefing/
-│   └── binance_briefing_data.py  ★ 新增 2026-06
-│                               get_binance_context()
-│                               读 binance_* 表 → 格式化字符串 → 注入AI简报
+│   └── binance_briefing_data.py  ★ Binance 市场结构数据摘要 v2
+│                               从 SQLite 查数据，计算 Z-score + 三因子状态
 │
 ├── data_collector/
-│   ├── binance_data.py       Binance数据采集（价格/OI/K线/IB/VP/CB溢价）
-│   ├── multi_funding.py      5交所资金费率（Binance/OKX/Bybit/Bitget/Gate.io）
-│   ├── etf_data.py           BTC ETF资金流（SoSoValue主+Farside备，差异>8%降级）
-│   └── cme_data.py           CME期货缺口计算
+│   ├── binance_data.py       Binance 价格/OI/IB/VP 采集
+│   ├── multi_funding.py      5交所费率聚合（Binance/OKX/Bybit/Bitget/Gate）
+│   ├── etf_data.py           ETF资金流（SoSoValue+Farside双源）
+│   └── cme_data.py           ★ CME 历史缺口追踪 v2（2026-06-27 更新）
+│                               24/7上线后改为追踪3个历史遗留缺口
 │
 ├── monitor/
-│   ├── liquidation_monitor.py  OKX WebSocket爆仓（主力实时清算源）
-│   │                           坑：sz*0.001*price 才是真实USD金额
-│   ├── funding_monitor.py    资金费率极端值预警
-│   ├── oi_monitor.py         OI突变预警
-│   ├── dom_monitor.py        大单挂单监控（Bybit订单簿）
-│   ├── binance_data_service.py  ★ 新增 2026-06
-│   │                           直连 fapi.binance.com（德国IP REST正常）
-│   │                           采集：OI/资金费率/大户多空比/全市场多空比
-│   │                           计算：市场象限（Q1/Q2/Q3/Q4）
-│   │                           写入：binance_oi/funding/ls_*/structure 表
-│   │                           轮询：每5分钟，无WebSocket
-│   └── structure_monitor.py  ★ 新增 2026-06
-│                               Q1/Q2确认（连续2次=10分钟）→ TG推送
-│                               大户多空比 >3.0或<0.5 → TG推送
-│                               冷却：象限60分钟 / 多空比120分钟
+│   ├── liquidation_monitor.py  OKX WS 清算监控（Binance德IP被封）
+│   ├── funding_monitor.py      资金费率极端预警
+│   ├── oi_monitor.py           OI异动预警（1H变化>5%触发）
+│   ├── dom_monitor.py          DOM深度监控
+│   └── structure_monitor.py    象限+多空比实时预警
+│
+├── services/
+│   ├── btc_binance_data_service.py  ★ 5分钟采集服务
+│   │                                  将 OI/Funding/L/S/象限 写入 SQLite
+│   └── etf_confirm_push.py          ETF 12:00 二次确认推送
 │
 ├── publisher/
-│   └── wordpress.py          WordPress发布（WP-CLI，REST API被德国IP封）
+│   └── wordpress.py          ★ WordPress 发布 v7（带彩色HTML）
 │
-├── services/                 辅助服务（待补充）
-├── data/                     运行时数据（.gitignore排除）
-│   └── etf_state.json        ETF状态缓存
+├── alert_bot/
+│   └── send.py               Telegram 消息发送（支持长消息自动拆分）
+│
+├── api/
+│   └── main.py               FastAPI 实时面板后端 v5（端口 8001）
+│
+├── web/
+│   └── index.html            实时面板前端（Vue3 + WebSocket）
 │
 ├── utils/
-│   └── helpers.py            setup_logger/get_env/now_sgt/fmt_time/fmt_usd
+│   └── helpers.py            通用工具（logger/get_env/时间格式/金额格式）
 │
-├── web/                      同步自 /www/wwwroot/mb.661688.xyz/
-│   ├── index.html            主面板（Vue3 CDN）
-│   └── history.html          历史趋势图（lightweight-charts v4.1.3）
-│                               新增Tab（2026-06）：OI趋势(亿$) / 大户多空比
-│
-├── run_dom.py                各监控启动入口（Supervisor command用）
-├── run_funding.py
-├── run_liquidation.py
-├── run_oi.py
-├── etf_confirm_push.py       ETF确认推送
-├── etf_timing.py             ETF时间调度
-├── deploy_etf_fix.sh         ETF修复脚本
-├── daily_briefing.py.bak.*   旧备份（可清理）
-├── requirements.txt          57个依赖包
-├── .gitignore
-└── PROJECT_CONTEXT.md        本文件
+├── btc_history.db            SQLite 数据库（不进 Git）
+├── .env                      密钥配置（不进 Git）
+├── requirements.txt          Python 依赖
+└── PROJECT_CONTEXT.md        旧版项目文档（已被本文档替代）
 ```
 
 ---
 
-## 四、数据库表（btc_history.db）
-
-### 原有表
-| 表名 | 内容 |
-|------|------|
-| snapshots | 5分钟快照（价格/OI/Funding/CVD/CB溢价）|
-| daily_summary | 每日汇总（IB/VP/MP/ETF/清算统计）|
-
-### 新增表（2026-06-24）
-| 表名 | 关键字段 | 频率 |
-|------|----------|------|
-| binance_oi | ts, oi_btc, oi_usd, mark_px | 每5分钟 |
-| binance_funding | ts, rate, next_settle, mark_px, index_px, premium_pct | 每5分钟 |
-| binance_ls_global | ts, long_pct, short_pct, ls_ratio | 每5分钟 |
-| binance_ls_top | ts, long_pct, short_pct, ls_ratio（大户Top20%）| 每5分钟 |
-| binance_structure | ts, quadrant, oi_chg, px_chg, oi_usd, mark_px, funding, top_ls, note | 每5分钟 |
-
----
-
-## 五、市场象限分析框架
-
-| 象限 | OI | 价格 | 含义 | 操作 |
-|------|----|------|------|------|
-| Q1 | ↑ | ↑ | 多头新仓·趋势上涨 | 顺势做多（最强）|
-| Q2 | ↑ | ↓ | 空头新仓·趋势下跌 | 顺势做空（最强）|
-| Q3 | ↓ | ↑ | 空头爆仓·轧空反弹 | 谨慎追多（弱）|
-| Q4 | ↓ | ↓ | 多头爆仓·去杠杆 | 谨慎追空（弱）|
-| FLAT | 微变 | 微变 | 震荡积累 | 等待方向 |
-
-判定阈值：OI变化 ±0.05%，价格变化 ±0.05%（5分钟粒度）
-
----
-
-## 六、API 接口
-
-```
-GET  /api/data                     面板全量数据
-GET  /api/health                   健康检查
-WS   /ws/live                      WebSocket实时推送
-GET  /api/history/metrics          历史快照（?metric=price&period=1d）
-GET  /api/binance/summary          最新：OI/费率/多空比/象限
-GET  /api/binance/oi/history       OI历史（?hours=24）
-GET  /api/binance/funding/history  费率历史（?hours=48）
-GET  /api/binance/ls/history       多空比历史（?hours=24）
-GET  /api/binance/structure        象限历史（?hours=24）
-```
-
----
-
-## 七、简报时间表（北京时间/SGT）
-
-| 时段 | 时间 | 会话 | max_tokens | 节数 |
-|------|------|------|------------|------|
-| 早盘 | 09:30 | morning | 8192 | 13节 |
-| 早盘·周一 | 09:30 | morning_monday | 8192 | 13节+CME专项 |
-| 欧盘 | 15:00 | europe | 2500 | 6节 |
-| 美盘 | 20:30 | evening | 3000 | 6节 |
-| 按需 | /b命令 | ondemand | 2000 | 5节 |
-
-**简报7步骤流程（daily_briefing.py）：**
-```
-[1/7] Binance永续+现货数据
-[2/7] 多交所Funding（5所）
-[3/7] ETF资金流
-[4/7] CME缺口
-[5/7] IB(60min) + VP(昨日)
-      ↓ 新增：binance_briefing_data.get_binance_context()
-[6/7] Claude AI分析 → generate_briefing()
-[7/7] TG发送 + WordPress发布
-```
-
----
-
-## 八、TG预警体系
-
-| 服务 | 触发条件 | 冷却 |
-|------|----------|------|
-| btc-liq-monitor | 单笔爆仓>$10万 / 1小时累计>$100万 | - |
-| btc-funding-monitor | 资金费率极端值 | - |
-| btc-oi-monitor | OI突变 | - |
-| btc-dom-monitor | 大单>$50万，持续>15秒，距价>0.5% | - |
-| btc-structure-monitor | Q1/Q2确认（连续2次=10分钟）| 60分钟 |
-| btc-structure-monitor | 大户多空比>3.0或<0.5 | 120分钟 |
-
----
-
-## 九、德国IP限制
-
-| 服务 | 状态 | 方案 |
-|------|------|------|
-| Binance WS (fstream) | 静默封锁 | 无解，改用OKX |
-| Binance REST API | ✅ 正常 | 直连 |
-| /fapi/v1/allForceOrders | ❌ 端点已下线 | 放弃 |
-| Binance爆仓数据 | 无法获取 | OKX WS替代 |
-| CF Worker → Binance REST | ❌ 403 | 放弃 |
-| CF Worker → fstream WS | ❌ 502 | 放弃 |
-| WordPress REST API | ❌ 封锁 | WP-CLI替代 |
-
----
-
-## 十、.env 变量结构
+## 五、.env 配置文件说明
 
 ```bash
-ANTHROPIC_API_KEY=        # Claude API（当前用 claude-sonnet-4-5）
-TELEGRAM_BOT_TOKEN=
-TELEGRAM_CHAT_ID=
+# Telegram Bot
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=...
+
+# Claude API
+ANTHROPIC_API_KEY=...
+
+# WordPress（本地 WP-CLI，REST API 被德国IP封锁）
 WP_PATH=/www/wwwroot/jianbao.661688.xyz
-SOSOVALUE_API_KEY=
-BINANCE_WORKER_URL=       # 暂停使用
-BINANCE_PROXY_KEY=        # 暂停使用
-LIQ_SINGLE_USD=100000
-LIQ_HOURLY_USD=1000000
-DOM_ALERT_USD=500000
-DOM_STRONG_USD=1000000
-DOM_MEGA_USD=5000000
-DOM_PENDING_SEC=15
-DOM_MIN_DIST_PCT=0.5
+
+# ETF 数据源
+SOSOVALUE_API_KEY=...      # SoSoValue 官方 API
+
+# 清算监控阈值（改后重启 btc-liq-monitor 生效）
+LIQ_SINGLE_USD=100000      # 单笔清算预警：$10万
+LIQ_HOURLY_USD=3000000     # 1小时累计预警：$300万
+
+# 启动安全验证（2026-06-27 新增）
+BTC_TRADER_KEY=...         # 64位随机密钥，不在GitHub上
 ```
 
 ---
 
-## 十一、关键依赖（requirements.txt 57包）
+## 六、SQLite 数据库（btc_history.db）
+
+由 `btc_binance_data_service.py` 每 5 分钟采集写入：
+
+| 表名 | 内容 | 主要字段 |
+|---|---|---|
+| `binance_oi` | 持仓量快照 | `ts`, `oi_usd`, `oi_btc` |
+| `binance_funding` | 资金费率历史 | `ts`, `rate`, `next_settle`, `premium_pct` |
+| `binance_ls_top` | 大户多空比 | `ts`, `ls_ratio`, `long_pct`, `short_pct` |
+| `binance_ls_global` | 全市场多空比 | `ts`, `ls_ratio`, `long_pct`, `short_pct` |
+| `binance_structure` | 5分钟象限 | `ts`, `quadrant`, `note`, `oi_chg`, `px_chg` |
+
+`briefing/binance_briefing_data.py` 在每次简报前读取这些表，计算 Z-score 和三因子状态。
+
+---
+
+## 七、简报系统（每日三次 + 随时触发）
+
+### 触发方式：
+
+| 会话名 | 触发时间 | 触发方式 |
+|---|---|---|
+| `morning` | 北京时间 09:30（UTC 01:30） | 自动定时 |
+| `morning_monday` | 周一 09:30 | 自动（周一自动替换 morning） |
+| `europe` | 北京时间 15:00（UTC 07:00） | 自动定时 |
+| `evening` | 北京时间 20:30（UTC 12:30） | 自动定时 |
+| `ondemand` | 随时 | TG 发送 `/b` 或 `简报` |
+
+### 简报主流程 `daily_briefing.py` — 7步骤：
 
 ```
-anthropic==0.109.1       Claude API
-python-telegram-bot==22.8
-websockets==16.0         OKX WS爆仓
-aiohttp==3.14.1          Binance REST异步
-python_binance==1.0.37   Binance封装
-beautifulsoup4==4.15.0   Farside爬取
-pandas==3.0.3
-loguru==0.7.3
-python-dotenv==1.2.2
-SQLAlchemy==2.0.50
-psycopg2-binary          PostgreSQL驱动（备用，当前用SQLite）
-redis==8.0.0             Redis（备用）
+[1] binance_collect()          → 价格/OI/Funding/IB/VP
+[2] collect_multi_funding()    → 5交所费率聚合
+[3] fetch_etf_flows()          → ETF资金流（SoSoValue+Farside）
+[4] get_cme_gap()              → CME历史缺口状态
+[5] get_todays_ib()            → 今日IB（北京时间08:00起首小时）
+    get_yesterday_volume_profile() → 昨日VP（POC/VAH/VAL/HVN/LVN）
+[6] get_binance_context()      → 从SQLite读OI/FR/LS/象限，计算Z-score+三因子
+    get_market_meta()          → 提取Z-score和市场状态供Header使用
+[7] generate_briefing()        → 调Claude API生成分析
+    → send(TG)                → 发Telegram
+    → publish_briefing(WP)    → 发WordPress
+```
+
+### TG Header 格式（build_header 输出）：
+
+```
+====================================
+BTC 早盘简报·当日交易计划
+2026-06-27 09:30 SGT
+------------------------------------
+永续合约 ：$59,996  UP +1.17%
+现货价格 ：$59,992（+1.17%）  基差：+4
+资金费率 ：+0.0041%  均值：+0.0054%
+费率Z分  ：-0.80（中性，信号相对干净）   ← v8 新增
+24H 成交额：$167亿
+CB 溢价  ：-96 USD（机构偏空）
+OI 24H   ：-1.54%
+市场状态 ：多头拥挤承压 ⚠️              ← v8 新增
+====================================
 ```
 
 ---
 
-## 十二、交易方法论
+## 八、Binance 市场结构数据模块（v2 核心功能）
 
-**三层框架：Context → Map → Trigger**
+文件：`briefing/binance_briefing_data.py`
 
-**关键术语：**
-- IB：首60分钟 | POC：最大成交量价格 | VAH/VAL：价值区上下沿
-- HVN：高量节点（支撑阻力）| LVN：低量真空区（速度区）
-- PDH/PDL/PDC：前日高低收 | CME缺口：周末价差
-- Kill Zone：亚洲08:00/伦敦16:00/纽约21:30 SGT
-- BSL/SSL：多空止损密集区 | OD/ORR/OA/OTD：开盘类型
+### 资金费率 Z-score（2026-06-27 新增）：
+- **数据源**：`binance_funding` 表，近 24 小时记录（约 288 条@5分钟）
+- **计算方式**：`Z = (当前费率 - 24H均值) / 24H标准差`
+- **解读阈值**：
+  - `Z > +2.0`：极端偏高 ⚠️ 多头严重拥挤，不宜追多
+  - `+1.0 ~ +2.0`：中度偏高，谨慎追多
+  - `-1.0 ~ +1.0`：中性，信号干净
+  - `-2.0 ~ -1.0`：中度偏低，谨慎追空
+  - `Z < -2.0`：极端偏低 ⚠️ 空头严重拥挤，关注轧空
+
+### 三因子市场状态分类（2026-06-27 新增）：
+
+| 因子 | 数据来源 | 分类规则 |
+|---|---|---|
+| OI动向 | `binance_oi` 近1小时变化 | >+0.3%=↑上升 / <-0.3%=↓下降 / 其余=→平稳 |
+| 费率极端度 | Z-score | >2=极高 / 1~2=偏高 / -1~1=中性 / -2~-1=偏低 / <-2=极低 |
+| 多空拥挤 | `binance_ls_global` long_pct | >60%=多头拥挤 / <40%=空头拥挤 / 其余=多空均衡 |
+
+**12 种状态标签：**
+
+| 状态 | 触发条件 | 操作导向 |
+|---|---|---|
+| 过热/顶部风险 ⚠️ | OI↑ + FR极高 + 多头拥挤 | 不追多，等待轧多信号 |
+| 挤压酝酿中 🔄 | OI↑ + FR极低 + 空头拥挤 | 关注空头挤压，轻多方向 |
+| 真实趋势建仓中 📊 | OI↑ + FR中性 + 多空均衡 | 可顺势跟随 |
+| 多头被迫平仓 ⬇️ | OI↓ + FR极高/偏高 + 多头拥挤 | 不接多，等OI企稳 |
+| 空头被迫平仓 ⬆️ | OI↓ + FR极低/偏低 + 空头拥挤 | 不接空，等OI企稳 |
+| 去杠杆/清洗中 📉 | OI↓ + FR中性 | 降低仓位，等待确认 |
+| 横盘多头拥挤 ⚠️ | OI平稳 + FR极高/偏高 + 多头拥挤 | 警惕向下清算 |
+| 横盘空头拥挤 ⚠️ | OI平稳 + FR极低/偏低 + 空头拥挤 | 警惕向上挤压 |
+| 健康趋势（多方主导）✅ | OI平稳 + FR偏高 + 多空均衡 | 顺势做多 |
+| 健康趋势（空方主导）✅ | OI平稳 + FR偏低 + 多空均衡 | 顺势做空 |
+| 趋势延续（均衡）✅ | OI平稳 + FR中性 + 多空均衡 | 顺象限方向操作 |
+| 多头拥挤承压 ⚠️ | OI平稳 + 多头拥挤（任意FR） | 不宜追多，关注向下扫止损 |
+| 空头拥挤承托 ⚠️ | OI平稳 + 空头拥挤（任意FR） | 不宜追空，关注挤压信号 |
+| 混合信号 | 未匹配以上任何状态 | 轻仓观望 |
 
 ---
 
-## 十三、历史Bug记录
+## 九、AI Prompt 系统（ai_analyst/briefing.py v6）
 
-| Bug | 原因 | 修复 |
-|-----|------|------|
-| OKX爆仓金额100×虚高 | sz字段是张数不是BTC | sz×0.001×price |
-| Funding显示历史值 | 用了/fundingRate端点 | 改用/premiumIndex |
-| MP数据源错误 | 误用现货API | 改用/fapi/v1/klines |
-| ETF数据三倍重复 | 日/周/月三种累计 | 取同日期最小绝对值 |
-| IB跨日不更新 | 模块缓存 | importlib.reload() |
-| TG显示**标记 | parse_mode未设 | 加HTML模式 |
-| 早盘简报截断 | max_tokens=3000 | 早盘改为8192 |
-| allForceOrders 400 | 端点永久下线 | 放弃 |
-| btc-api spawn error | binance_routes导入路径错 | 改为内联到main.py |
+### Claude API 参数：
+- 模型：`claude-sonnet-4-6`（或当前最新 Sonnet）
+- max_tokens：早盘 8192 / 欧盘 2500 / 美盘 3000 / 随时 2000
+
+### 早盘简报 13 节结构（morning / morning_monday）：
+```
+1. 宏观背景评级（A/B/C/D）
+2. BTC 现货 ETF 资金流向解读
+3. CME 历史缺口追踪           ← 原"缺口分析"，2026-06-27 更新
+4. 今日 IB 分析·开盘类型确认
+5. 昨日 Market Profile 结构
+6. 昨日 Volume Profile 概览
+7. 流动性分布·Stop Hunt 分析
+8. 衍生品深度解读              ← 含Z-score + 三因子状态解读
+9. AMT 市场状态·今日框架       ← 引用三因子分类判断趋势质量
+10. Kill Zone 时间窗口计划
+11. 具体操作方案（做多/做空/观望）
+12. 风险管理·止损设置
+13. 一句话总结
+```
+
+### 欧盘简报 6 节（europe）：
+```
+1. 欧盘前市场更新·价格结构
+2. ETF 资金流向最新动态
+3. 衍生品实时更新             ← 含Z-score变化 + 三因子状态切换提示
+4. 欧盘关键触发价位
+5. 欧盘操作方案
+6. 一句话更新
+```
+
+### 美盘简报 5 节（evening）：
+```
+1. 当前市场评级
+2. 价格结构·收盘前分析
+3. 美盘前衍生品状态           ← 含Z-score全日演变 + 三因子最终状态
+4. 流动性更新·NY Kill Zone 预警
+5. 美盘最终操作方案
+```
+
+### 随时简报 4 节（ondemand）：
+```
+1. 当前市场评级
+2. 价格结构
+3. 衍生品快照                 ← 含Z-score + 三因子状态
+4. 当前最优操作思路
+```
+
+### 周一早盘专项（morning_monday）额外数据块：
+```
+【周一结构回顾 & CME 历史缺口追踪】
+注意：2026-05-29 CME 切换 24/7，周一不再有"开盘跳空"效应
+重点改为：周末走势延续分析 + CME 历史缺口追踪
+```
 
 ---
 
-## 十四、变更日志
+## 十、CME 缺口模块（v2 — 历史追踪模式）
 
-### 2026-06-24
-- 新增 btc-binance-data 服务（OI/费率/多空比采集）
-- 新增 btc-structure-monitor 服务（象限+多空比TG预警）
-- 简报集成市场象限数据（第8节出现Q1/Q2/Q3/Q4分析）
-- history.html 新增 OI趋势(亿$) 和 大户多空比 图表Tab
-- 建立 GitHub 公开仓库 saiy829/btc-trader
-- 建立本项目文档 PROJECT_CONTEXT.md
+**背景**：2026年5月29日，CME Group 正式切换 BTC 期货为 7×24 交易，
+每周六 UTC 03:00-05:00（北京时间 11:00-13:00）仅保留 2 小时维护窗口。
+**不再产生新的周末缺口。**
+
+**文件**：`data_collector/cme_data.py`（v2，已部署 VPS，待 git_sync 同步 GitHub）
+
+**3 个历史遗留缺口（截至 2026-06-27 全部未填）：**
+
+| 缺口 | 价格区间 | 形成时间 | 当前距离（@$60,300） |
+|---|---|---|---|
+| 缺口① 1月末高位 | $79,200 - $80,400 | 2026-01 周末 | +31.3%（$+18,900） |
+| 缺口② Q1次高位 | $78,000 - $78,500 | 2026-Q1 | +29.3%（$+17,700） |
+| 缺口③ Q1中段 | $69,000 - $70,000 | 2026-Q1 | **+14.4%（$+8,700）← 最近** |
+
+**自动退休机制**：当 `all_filled=True`（BTC 涨过 $80,400），`_cme_block()` 输出退休提示，可从简报中移除此节。
 
 ---
 
-*更新规则：每次重大改动后同步更新本文件并 git push*
+## 十一、WordPress 发布系统（v7 彩色）
+
+文件：`publisher/wordpress.py`
+
+**发布方式**：WP-CLI（REST API 被德国 IP 封锁，改用本地 CLI）
+```python
+wp_path = "/www/wwwroot/jianbao.661688.xyz"
+subprocess.run(['wp', 'post', 'create', ...])
+```
+
+### 颜色系统：
+
+| 元素 | 颜色 | 十六进制 |
+|---|---|---|
+| 做多方向 / 目标价 | 绿色 | `#1e8449` |
+| 做空方向 / 止损价 | 红色 | `#c0392b` |
+| 关键价位 $XX,XXX | 橙色 | `#d35400` |
+| 入场/触发价 | 蓝色 | `#1565c0` |
+| IB/MP 数据（PDH/PDL/POC 等） | 紫色 | `#6a1b9a` |
+| 评级 A | 绿色 | 同做多 |
+| 评级 B | 蓝色 | 同入场 |
+| 评级 C | 橙黄 | `#e67e22` |
+| 评级 D | 红色 | 同做空 |
+| Z-score \|z\|>2 | 红色 | 同做空 |
+| Z-score \|z\|>1 | 橙黄 | `#e67e22` |
+| Z-score 中性 | 绿色 | 同做多 |
+| 市场状态 badge | 按风险类型 | 红/橙/绿/蓝 |
+| BSL / SSL | 橙色 | 同关键价位 |
+
+### Header Card（WP文章顶部数据卡片）：
+- 价格 + 24H涨跌（绿/红）
+- 永续 vs 现货对比表格
+- 资金费率 + OI 24H
+- **Z-score 行 + 市场状态行**（v7 新增）
+- Coinbase 溢价（含绿/红背景）
+
+---
+
+## 十二、实时监控服务
+
+### 清算监控（btc-liq-monitor）：
+- **数据源**：OKX WebSocket（Binance WS 德国IP被封）
+- **阈值**（从 .env 读取）：单笔 > $10万 发预警；1H累计 > $300万 发预警
+- 大额清算触发 AI 分析（`ai_analyst/liq_briefing.py`）
+
+### 资金费率监控（btc-funding-monitor）：
+- 每 5 分钟轮询 5 家交所
+- 触发：单所 |rate| > 0.05%（30分钟冷却）
+- 强触发：3所同时极端（15分钟冷却）
+- 紧急：单所 |rate| > 0.10%（10分钟冷却）
+
+### OI 监控（btc-oi-monitor）：
+- 每 5 分钟检查 1H OI 变化
+- 触发：1H 变化 > 5%（标准）/ > 10%（紧急）
+
+### DOM 深度监控（btc-dom-monitor）：
+- 实时监控挂单深度异动
+
+### 象限+多空比监控（btc-structure-monitor）：
+- 结合 5 分钟象限（Q1/Q2/Q3/Q4）和多空比发送预警
+
+### Binance 数据服务（btc-binance-data）：
+- 每 5 分钟采集并写入 SQLite：OI / Funding / 多空比 / 象限
+- 为 `binance_briefing_data.py` 的 Z-score 和三因子计算提供历史数据
+
+---
+
+## 十三、实时面板（mb.661688.xyz）
+
+- **后端**：FastAPI v5，端口 8001，WebSocket 推送
+- **前端**：`web/index.html`，Vue3 + 深色/浅色主题
+- **数据**：价格、OI、Funding、CB溢价、CVD、清算列表、IB、VP
+- **CVD**：通过 Binance aggTrades WebSocket 实时累积，每 UTC 自然日重置
+
+---
+
+## 十四、安全保护（2026-06-27 新增）
+
+文件：`startup_guard.py`（部署在 VPS，不在 GitHub）
+
+```python
+# scheduler.py 的 main() 最顶部调用：
+from startup_guard import verify
+verify()
+```
+
+**双重验证逻辑：**
+1. **密钥验证**：`.env` 中的 `BTC_TRADER_KEY` 必须存在且 ≥ 32 字符
+2. **主机绑定**：hostname 必须包含 `206507`
+
+**防护效果**：别人 clone GitHub 代码后，没有 `.env` 密钥且不在指定 VPS 上，运行时立即退出。
+
+---
+
+## 十五、Git 自动同步（2026-06-27 新增）
+
+文件：`/opt/btc-trader/git_sync.sh`（在 VPS，不在 GitHub）
+
+**触发时间**：每天北京时间 03:00（cron：`0 19 * * *` UTC）
+
+**同步范围**（自动 git add 的目录/文件）：
+```
+briefing/  data_collector/  publisher/  ai_analyst/
+alert_bot/  utils/  daily_briefing.py  scheduler.py
+startup_guard.py（若已加入）
+```
+
+**不同步**（.gitignore 排除）：
+```
+*.db  *.log  logs/  __pycache__/  *.pyc  .env  venv/  data/
+```
+
+**查看同步日志**：
+```bash
+tail -20 /opt/btc-trader/logs/git_sync.log
+```
+
+---
+
+## 十六、数据源清单与已知限制
+
+| 数据 | 来源 | 备注 |
+|---|---|---|
+| BTC永续价格/OI/IB/VP | Binance REST | 正常 |
+| 资金费率（实时） | Binance `/fapi/v1/premiumIndex` | v2修复：原用历史接口有延迟 |
+| 5交所费率 | 各所公开API（无需Key） | Binance/OKX/Bybit/Bitget/Gate |
+| 实时清算 | OKX WebSocket | Binance WS 德国IP被封 |
+| ETF资金流 | SoSoValue API（需Key） + Farside 爬虫 | 双源交叉验证 |
+| ETF 12:00 补发 | `/opt/btc-trader/services/etf_confirm_push.py` | Cron 每天周二至周六 12:00 |
+| CME缺口 | Binance现货近似（v2改为静态历史追踪） | CME 24/7后不再动态计算 |
+| Coinbase溢价 | Binance+Coinbase价差计算 | 机构动向指标 |
+| Fear & Greed | 外部API | 已集成到简报数据块 |
+
+---
+
+## 十七、交易方法论背景（Sea 的交易框架）
+
+项目服务于 Sea 的 BTC 永续合约日内交易，核心方法论：
+
+**四层框架**：AMT（拍卖市场理论）→ Market Profile → Volume Profile → Order Flow
+
+**交易软件**：ATAS（订单流分析，包含 Footprint/CVD/ClusterSearch/TrappedTraders/PhantomFlow/DOM）
+
+**核心概念**：
+- IB（Initial Balance）= 每日北京时间 08:00-09:00 第一小时价格区间
+- 开盘类型：OD（开盘驱动）/ORR（区间返回）/OA（区间扩展）/OTD（趋势日开盘）
+- Kill Zones：亚盘 / 伦敦开盘 / NY 开盘
+- PDH/PDL/PDC：昨日高/低/收
+- POC/VAH/VAL：Volume Profile 成交量峰值/区间上下沿
+- HVN/LVN：高/低成交量节点
+- BSL/SSL：Buy Side / Sell Side Liquidity（流动性猎取目标）
+- ICT 概念：AMD 模型、Order Block、FVG（公允价值缺口）、Judas Swing
+
+---
+
+## 十八、近期重大更新记录
+
+| 日期 | 更新内容 |
+|---|---|
+| 2026-06-27 | 新增资金费率 Z-score（24H滚动窗口） |
+| 2026-06-27 | 新增三因子市场状态分类（12种状态） |
+| 2026-06-27 | TG Header 新增「费率Z分」和「市场状态」行 |
+| 2026-06-27 | WordPress 发布升级为 v7 彩色系统 |
+| 2026-06-27 | AI Prompt 全会话更新（早/欧/美/随时四个会话） |
+| 2026-06-27 | CME 缺口模块改为历史遗留缺口追踪模式 |
+| 2026-06-27 | startup_guard.py 密钥+主机双重验证 |
+| 2026-06-27 | git_sync.sh VPS→GitHub 每日 03:00 自动同步 |
+| 2026-06-27 | /root/btc-deploy 管理一次性脚本，保持项目目录整洁 |
+
+---
+
+## 十九、注意事项与已知问题
+
+1. **德国IP限制**：Binance 永续合约 WebSocket 被地理封锁，清算监控改用 OKX WS
+2. **WordPress REST API 封锁**：德国IP无法访问，改用 WP-CLI 本地命令行发布
+3. **ETF 数据延迟**：各发行商报告有时间差，设计了 12:00 二次确认推送机制
+4. **CME 缺口自动退休**：当 BTC 涨过 $80,400，三个历史缺口全部填补，`_cme_block()` 自动输出退休提示
+5. **GitHub 同步滞后**：白天手动部署的文件要等次日 03:00 才同步到 GitHub
+6. **startup_guard.py 和 git_sync.sh**：这两个文件在 VPS 有，在 GitHub 暂时没有（需手动加入 git add 列表）
+
+---
+
+## 二十、新对话开始时的标准流程
+
+```
+1. 粘贴本文档到对话开头
+2. 说明需求
+3. Claude 读取 GitHub 最新代码
+4. 确认"今天是否有新部署未同步到GitHub"
+5. 以 VPS 实际状态为准进行修改
+6. 生成新文件 → 用户 scp 上传 → supervisorctl restart → 验证
+```

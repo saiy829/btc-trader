@@ -69,7 +69,14 @@ def _analyze_footprint(bars):
 
 
 def get_atas_context(hours: int = 4) -> str:
-    last_bar = _q("SELECT created_at FROM atas_bars ORDER BY id DESC LIMIT 1")
+    # 2026-07-01：四路市场（币安/OKX × 现货/合约）接入同一张表后，简报只用
+    # 币安永续这一路（跟AI简报"BTCUSDT永续合约分析师"的定位一致），加 market
+    # 过滤，避免拿OKX现货的心跳去判断"币安永续这路ATAS是否离线"。
+    last_bar = _q(
+        "SELECT created_at FROM atas_bars "
+        "WHERE exchange='binance' AND market_type='perp' "
+        "ORDER BY id DESC LIMIT 1"
+    )
     if not last_bar:
         return ""
     try:
@@ -86,13 +93,17 @@ def get_atas_context(hours: int = 4) -> str:
         SELECT timestamp, delta, cumulative_delta,
                poc_price, max_pos_delta_price, max_neg_delta_price,
                ask_vol, bid_vol, footprint_json
-        FROM atas_bars WHERE created_at >= ?
+        FROM atas_bars
+        WHERE created_at >= ? AND exchange='binance' AND market_type='perp'
         ORDER BY timestamp ASC
     """, (cutoff,))
 
     if not bars:
         return ""
 
+    # signals 暂不加 exchange/market 过滤：/atas/signal 走ATAS内置Webhook，
+    # 还没有可靠的市场标签来源（见main.py注释），过滤会导致查不到任何数据。
+    # 等观察到 raw_instrument 实际取值规律后再补规则。
     signals = _q("""
         SELECT indicator_name, price, timestamp FROM atas_signals
         WHERE created_at >= ? AND indicator_name != 'Unknown'
@@ -101,7 +112,8 @@ def get_atas_context(hours: int = 4) -> str:
 
     trades = _q("""
         SELECT direction, volume, price, threshold_level, timestamp
-        FROM atas_large_trades WHERE created_at >= ?
+        FROM atas_large_trades
+        WHERE created_at >= ? AND exchange='binance' AND market_type='perp'
         ORDER BY timestamp ASC
     """, (cutoff,))
 

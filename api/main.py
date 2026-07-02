@@ -11,7 +11,7 @@ from datetime import datetime, timezone, timedelta, date
 from typing import Set, Optional
 
 import aiohttp, websockets
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 
 SGT = timezone(timedelta(hours=8))
@@ -723,6 +723,7 @@ async def task_gate_liq() -> None:
 async def lifespan(_app: FastAPI):
     log.info("初始化...")
     db_init()
+    _atas_db_init()
     _check_liq_day_rollover()
 
     try: await asyncio.wait_for(_fetch_core(), timeout=20)
@@ -929,3 +930,576 @@ async def binance_structure(hours: int = 24):
         ORDER BY ts DESC
     """, (cutoff,))
     return {"hours": hours, "count": len(rows), "data": rows}
+
+
+# ══════════════════════════════════════════════════════════════════
+#  ATAS Bridge — Phase 1-3：Webhook信号 / K线+Footprint / 大单捕获
+#  2026-07-01 恢复重建：今日 Gate.io+OKX 健康监控上线部署时，
+#  本整段代码（约450行）被意外整体删除，AtasBridge.dll 推送全部404，
+#  atas_bars / atas_large_trades / atas_signals 三张表自当时起停止更新。
+#  本次恢复的同时，加入多市场支持（exchange + market_type 标签），
+#  配合 AtasBridge.cs v5.0（新增 Exchange / MarketType 设置项，
+#  币安/OKX 现货/合约 四个图表各自标注身份后推送，不再混算）。
+# ══════════════════════════════════════════════════════════════════
+
+_ATAS_DB = "/opt/btc-trader/btc_history.db"
+
+# 中文展示映射（Telegram 大单告警用）
+_ATAS_EXCHANGE_CN = {"binance": "币安", "okx": "OKX", "unset": "未知(图表未配置)"}
+_ATAS_MARKET_CN   = {"perp": "永续", "spot": "现货", "unset": "未知(图表未配置)"}
+
+
+def _atas_resolve_market(data: dict) -> tuple:
+    """
+    从推送数据里解析 exchange/market_type，区分两种情况：
+      1. 字段整个不存在 → 旧版指标(未重新编译到v5.0)，按老逻辑默认 binance/perp，
+         保持向后兼容，不影响还没来得及升级的图表。
+      2. 字段存在但值是 "unset" → 新版指标(v5.1+)已经在推送，但这张图表的
+         Exchange/Market Type 设置面板还没手动选过——保留 "unset" 原样，不
+         悄悄冒充 binance/perp，同时记一条警告日志，方便定位到底哪张图表
+         漏配置了。
+    """
+    exchange = data.get("exchange")
+    market   = data.get("market_type")
+    if exchange is None and market is None:
+        return "binance", "perp"   # 旧版指标，字段整个不存在
+    exchange = exchange or "unset"
+    market   = market or "unset"
+    if exchange == "unset" or market == "unset":
+        log.warning(
+            f"[ATAS] 收到未配置身份的图表数据 exchange={exchange} market={market} "
+            f"—— 去 ATAS 里检查是不是有图表的 Exchange/Market Type 设置面板忘了选"
+        )
+    return exchange, market
+
+
+def _atas_db_init():
+    """建表（首次部署走这里）+ 补充多市场字段迁移（老表安全幂等追加）
+
+    2026-07-01 修复：原顺序是"建表+建索引"写在同一个 executescript() 里，
+    但 idx_atas_bars_mkt / idx_atas_trades_mkt 这两个索引依赖 exchange/
+    market_type 字段——VPS上 atas_bars/atas_large_trades 两张表早就存在
+    （CREATE TABLE IF NOT EXISTS 对已存在的表是空操作，不会补字段），
+    建索引时字段还不存在，直接报 "no such column: exchange" 中断整个函数，
+    btc-api 启动阶段崩溃重启。现改为三步严格分离：
+      1) 建表（新装环境这步已经带全字段，兼容处理）
+      2) ALTER TABLE 给老表补字段（幂等，已存在的字段会报duplicate column，忽略）
+      3) 字段确保存在后，再建依赖这些字段的索引
+    """
+    conn = sqlite3.connect(_ATAS_DB)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS atas_bars (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT, timeframe TEXT DEFAULT '5m',
+            exchange TEXT DEFAULT 'binance', market_type TEXT DEFAULT 'perp',
+            open REAL, high REAL, low REAL, close REAL,
+            volume REAL, ask_vol REAL, bid_vol REAL,
+            delta REAL, cumulative_delta REAL,
+            max_delta REAL, min_delta REAL,
+            max_oi REAL, min_oi REAL, oi_change REAL,
+            poc_price REAL, max_vol_price REAL,
+            max_pos_delta_price REAL, max_neg_delta_price REAL,
+            footprint_json TEXT,
+            dom_cum_bids REAL, dom_cum_asks REAL,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS atas_large_trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT, price REAL, volume REAL, volume_usd REAL,
+            exchange TEXT DEFAULT 'binance', market_type TEXT DEFAULT 'perp',
+            direction TEXT, threshold_level TEXT,
+            near_poc INTEGER DEFAULT 0, poc_price REAL,
+            distance_from_poc_pct REAL, current_delta REAL,
+            dom_bid_pressure REAL, dom_ask_pressure REAL,
+            first_seen_volume REAL, growth_seconds REAL, update_count INTEGER,
+            telegram_sent INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS atas_signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT, indicator_name TEXT, signal_type TEXT,
+            price REAL, raw_payload TEXT,
+            exchange TEXT, market_type TEXT, raw_instrument TEXT,
+            telegram_sent INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_atas_bars_ts    ON atas_bars(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_atas_trades_ts  ON atas_large_trades(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_atas_signals_ts ON atas_signals(timestamp);
+    """)
+    conn.commit()
+    conn.close()
+
+    # ── 第二步：给"部署前已存在"的老表补新字段。对已经有该字段的表会命中
+    #    "duplicate column"异常，直接忽略即可——这是幂等设计，服务重启/
+    #    重复部署多少次都安全，不是报错信号 ────────────────────────────
+    migrations = [
+        "ALTER TABLE atas_bars ADD COLUMN exchange TEXT DEFAULT 'binance'",
+        "ALTER TABLE atas_bars ADD COLUMN market_type TEXT DEFAULT 'perp'",
+        "ALTER TABLE atas_bars ADD COLUMN footprint_json TEXT",
+        "ALTER TABLE atas_large_trades ADD COLUMN exchange TEXT DEFAULT 'binance'",
+        "ALTER TABLE atas_large_trades ADD COLUMN market_type TEXT DEFAULT 'perp'",
+        "ALTER TABLE atas_large_trades ADD COLUMN first_seen_volume REAL",
+        "ALTER TABLE atas_large_trades ADD COLUMN growth_seconds REAL",
+        "ALTER TABLE atas_large_trades ADD COLUMN update_count INTEGER",
+        "ALTER TABLE atas_signals ADD COLUMN exchange TEXT",
+        "ALTER TABLE atas_signals ADD COLUMN market_type TEXT",
+        "ALTER TABLE atas_signals ADD COLUMN raw_instrument TEXT",
+    ]
+    conn = sqlite3.connect(_ATAS_DB)
+    for sql in migrations:
+        try:
+            conn.execute(sql)
+            conn.commit()
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                log.warning(f"[ATAS] 字段迁移失败: {sql} | {e}")
+    conn.close()
+
+    # ── 第三步：字段现在保证存在了（无论老表刚被迁移、还是新表建表时就带），
+    #    这时候才能安全建这两个依赖 exchange/market_type 的索引 ──────────
+    conn = sqlite3.connect(_ATAS_DB)
+    conn.executescript("""
+        CREATE INDEX IF NOT EXISTS idx_atas_bars_mkt   ON atas_bars(exchange, market_type);
+        CREATE INDEX IF NOT EXISTS idx_atas_trades_mkt ON atas_large_trades(exchange, market_type);
+    """)
+    conn.commit()
+    conn.close()
+
+    log.info("[ATAS] btc_history.db 三张表已就绪（含多市场字段）")
+
+
+# ─── ATAS 信号冷却（内存，重启清零）──────────────────────────────
+_atas_cooldown: dict = {}
+_ATAS_COOLDOWN_SEC = 60   # 同类信号60秒内不重复发Telegram
+
+
+def _parse_atas_messages(messages: list) -> list:
+    """解析 ATAS Webhook messages 数组
+    格式：[2026-06-29 21:11:26] [BTCUSDT]: Price reached 60080.0 level
+    返回：[{time, instrument, desc, price}]
+    """
+    import re as _re
+    parsed = []
+    for msg in messages:
+        m = _re.search(r'\[([^\]]+)\]\s+\[([^\]]+)\]:\s+(.+)', msg)
+        if not m:
+            continue
+        item = {
+            'time':       m.group(1),
+            'instrument': m.group(2),
+            'desc':       m.group(3).strip(),
+        }
+        price_m = _re.search(r'([\d]+\.?\d*)', item['desc'].replace(',', ''))
+        if price_m:
+            item['price'] = float(price_m.group())
+        parsed.append(item)
+    return parsed
+
+
+def _infer_indicator(parsed: list) -> str:
+    """从解析结果推断指标名称"""
+    if not parsed:
+        return 'Unknown'
+    desc = parsed[0].get('desc', '').lower()
+    if 'price reached' in desc or 'absorption' in desc:
+        return 'Absorption'
+    if 'delta' in desc:
+        return 'DeltaSurge'
+    if 'trapped' in desc:
+        return 'TrappedTraders'
+    if 'power' in desc:
+        return 'PowerBars'
+    return 'ATASSignal'
+
+
+@app.post("/atas/signal")
+async def atas_signal(request: Request):
+    """
+    接收 ATAS 内置 Webhook 推送（Absorption 等指标告警通道）。
+    走的是 ATAS 自带 Webhook 机制，不经过 AtasBridge.dll 的自定义代码，
+    所以暂时还没有 exchange/market_type 标签——messages 里的 instrument
+    字段先原样存进 raw_instrument，观察四个图表各自实际报什么值之后，
+    再定规则回填 exchange/market_type（这次不瞎猜，等真实数据）。
+    """
+    try:
+        raw = await request.json()
+    except Exception:
+        raw = {}
+
+    ts       = datetime.now(SGT).isoformat()
+    messages = raw.get('messages', [])
+    parsed   = _parse_atas_messages(messages)
+
+    indicator  = _infer_indicator(parsed)
+    first_desc = parsed[0].get('desc', '') if parsed else ''
+    first_px   = parsed[0].get('price')    if parsed else None
+    first_inst = parsed[0].get('instrument') if parsed else None
+
+    # ── 写库 ──────────────────────────────────────────────────────
+    try:
+        conn = sqlite3.connect(_ATAS_DB, timeout=5)
+        conn.execute(
+            'INSERT INTO atas_signals '
+            '(timestamp, indicator_name, signal_type, price, raw_payload, '
+            ' raw_instrument, created_at) '
+            'VALUES (?,?,?,?,?,?,?)',
+            (ts, indicator, first_desc, first_px,
+             json.dumps(raw, ensure_ascii=False),
+             first_inst,
+             datetime.now(SGT).strftime('%Y-%m-%d %H:%M:%S'))
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log.warning(f'[ATAS] signal 写库失败: {e}')
+
+    log.info(f'[ATAS] signal [{indicator}] instrument={first_inst} {len(parsed)}条 首价={first_px}')
+
+    # ── 过滤测试消息 ───────────────────────────────────────────────
+    is_test = any('Test alert' in (p.get('desc', '')) for p in parsed)
+    if is_test or not parsed:
+        return {'status': 'ok', 'parsed': parsed, 'telegram': 'skipped_test'}
+
+    # ── 冷却检查 ───────────────────────────────────────────────────
+    now_ts  = datetime.now(SGT).timestamp()
+    last_ts = _atas_cooldown.get(indicator, 0)
+    if now_ts - last_ts < _ATAS_COOLDOWN_SEC:
+        remain = int(_ATAS_COOLDOWN_SEC - (now_ts - last_ts))
+        log.info(f'[ATAS] {indicator} 冷却中 剩余{remain}s')
+        return {'status': 'ok', 'parsed': parsed, 'telegram': f'cooldown_{remain}s'}
+
+    # ── 构建 Telegram 消息 ─────────────────────────────────────────
+    prices     = [p['price'] for p in parsed if 'price' in p]
+    time_str   = parsed[0]['time'].split(' ')[-1] if parsed else '--:--:--'
+    instrument = parsed[0].get('instrument', 'BTCUSDT')
+
+    if len(prices) > 1:
+        price_str = f'{min(prices):,.0f} ~ {max(prices):,.0f}'
+    elif prices:
+        price_str = f'{prices[0]:,.0f}'
+    else:
+        price_str = '触发（无具体价格）'
+
+    tg_msg = (
+        f'📡 {indicator} | {instrument}\n\n'
+        f'💰 价格：{price_str}\n'
+        f'📊 触发档位：{len(parsed)} 个\n'
+        f'⏰ {time_str}（北京）'
+    )
+
+    # ── 发送 Telegram ──────────────────────────────────────────────
+    try:
+        from alert_bot.send import async_send
+        await async_send(tg_msg)
+        _atas_cooldown[indicator] = now_ts
+        log.info(f'[ATAS] Telegram 已推送: {indicator} {price_str}')
+    except Exception as e:
+        log.warning(f'[ATAS] Telegram 推送失败: {e}')
+
+    return {'status': 'ok', 'parsed': parsed, 'indicator': indicator}
+
+
+@app.post("/atas/trade")
+async def atas_trade(request: Request, background_tasks: BackgroundTasks):
+    try:
+        data = await request.json()
+    except Exception:
+        return {"status": "error", "detail": "invalid json"}
+
+    level     = data.get("threshold_level", "medium")
+    volume    = float(data.get("volume", 0))
+    price     = float(data.get("price", 0))
+    vol_usd   = float(data.get("volume_usd", volume * price))
+    direction = data.get("direction", "")
+    exchange, market = _atas_resolve_market(data)
+
+    try:
+        conn = sqlite3.connect(_ATAS_DB, timeout=5)
+        cur = conn.execute("""
+            INSERT INTO atas_large_trades
+            (timestamp, price, volume, volume_usd, exchange, market_type,
+             direction, threshold_level,
+             near_poc, poc_price, distance_from_poc_pct,
+             current_delta, first_seen_volume, growth_seconds, update_count,
+             created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (
+            data.get("timestamp"), price, volume, vol_usd, exchange, market,
+            direction, level,
+            1 if data.get("near_poc") else 0,
+            data.get("poc_price"),
+            data.get("dist_from_poc_pct"),
+            data.get("current_bar_delta"),
+            data.get("first_seen_volume"),
+            data.get("growth_seconds"),
+            data.get("update_count"),
+            datetime.now(SGT).strftime("%Y-%m-%d %H:%M:%S")
+        ))
+        record_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log.warning(f"[ATAS] trade write error: {e}")
+        return {"status": "error", "detail": str(e)}
+
+    log.info(f"[ATAS] trade [{exchange}/{market}] {direction} {volume:.1f}BTC @ {price:,.0f} [{level}]")
+
+    if level in ("large", "whale"):
+        background_tasks.add_task(_send_trade_alert, data, record_id)
+
+    return {"status": "ok", "id": record_id, "level": level}
+
+
+async def _send_trade_alert(data: dict, record_id: int):
+    try:
+        from alert_bot.send import async_send
+        direction = data.get("direction", "buy")
+        volume    = float(data.get("volume", 0))
+        price     = float(data.get("price", 0))
+        vol_usd   = float(data.get("volume_usd", volume * price))
+        level     = data.get("threshold_level", "large")
+        exchange, market = _atas_resolve_market(data)
+        poc_price = data.get("poc_price")
+        dist_pct  = data.get("dist_from_poc_pct")
+        bar_delta = data.get("current_bar_delta", 0)
+        ts        = data.get("timestamp", "")
+        time_str  = ts.split("T")[-1][:8] if "T" in ts else ts
+        wan       = vol_usd / 10000
+        usd_str   = f"{wan/10000:.2f}yi" if wan >= 10000 else f"{wan:.0f}wan"
+        is_buy    = (direction == "buy")
+
+        # price range: start -> pushed（只在同一市场内找参考价，避免跨市场串价）
+        try:
+            _pc = sqlite3.connect(_ATAS_DB, timeout=3)
+            _pr = _pc.execute(
+                "SELECT close FROM atas_bars WHERE exchange=? AND market_type=? "
+                "ORDER BY id DESC LIMIT 1",
+                (exchange, market)
+            ).fetchone()
+            _pc.close()
+            curr_px = float(_pr[0]) if _pr else None
+        except Exception:
+            curr_px = None
+
+        px_diff = (curr_px - price) if curr_px else 0
+        if curr_px and abs(px_diff) > 5:
+            if is_buy and px_diff > 0:
+                price_range = f"${price:,.0f}(起始) → ${curr_px:,.0f}(推进)"
+            elif not is_buy and px_diff < 0:
+                price_range = f"${price:,.0f}(起始) → ${curr_px:,.0f}(下测)"
+            else:
+                price_range = f"${price:,.0f}(未跟进)"
+        else:
+            price_range = f"${price:,.0f}"
+
+        dir_cn       = "买入" if is_buy else "卖出"
+        dir_icon     = "🟢" if is_buy else "🔴"
+        whale_hdr    = "🚨🐋" if level == "whale" else "🐋"
+        level_cn     = "鲸鱼级" if level == "whale" else "大额"
+        market_label = (f"{_ATAS_EXCHANGE_CN.get(exchange, exchange)}BTCUSDT"
+                         f"{_ATAS_MARKET_CN.get(market, market)}")
+
+        try:
+            from datetime import datetime as _dt
+            _t = _dt.fromisoformat(ts.replace("Z",""))
+            bar_min  = (_t.minute // 5) * 5
+            bar_time = _t.strftime(f"%H:{bar_min:02d}")
+        except Exception:
+            bar_time = time_str
+
+        poc_pos = ""
+        if poc_price and dist_pct is not None:
+            if dist_pct > 0.05:
+                poc_rel = f"价格在上方 +{dist_pct:.2f}%"
+            elif dist_pct < -0.05:
+                poc_rel = f"价格在下方 {dist_pct:.2f}%"
+            else:
+                poc_rel = "价格就在VP-POC附近（强博弈区）"
+            poc_pos = (f"\n  5min VP-POC：${poc_price:,.0f}(当前K线成交量最大价位)\n  与POC偏移：{poc_rel}")
+
+        delta_line = ""
+        if bar_delta:
+            bd = float(bar_delta)
+            ddir = "买方占优" if bd > 0 else "卖方占优"
+            delta_line = f"\n  K线Delta({bar_time}起)：{bd:+.1f}({ddir})"
+
+        cvd_line = ""
+        if data.get("current_cvd"):
+            cvd_line = f"\n  今日CVD累计：{float(data['current_cvd']):+,.1f}"
+
+        if is_buy and poc_price and dist_pct is not None and dist_pct > 0:
+            judge = f"VP-POC上方主动买入，短期偏多 |支撑参考：${poc_price:,.0f}"
+        elif not is_buy and poc_price and dist_pct is not None and dist_pct < 0:
+            judge = f"VP-POC下方主动卖出，短期偏空 |阻力参考：${poc_price:,.0f}"
+        elif is_buy:
+            judge = "主动大额买入，关注价格能否延续"
+        else:
+            judge = "主动大额卖出，关注价格能否继续下行"
+
+        # 2026-07-01 新增：累计轨迹诊断——这笔单子首次被识别到时的量、从首次
+        # 识别到现在过了多久、期间更新了几次。用来判断最终这个大数字是平缓
+        # 累积上来的（大概率真实），还是几乎瞬间跳出来的（值得怀疑，去查
+        # ATAS那边是不是把不相关的成交合并了）。旧版指标(未重新编译)不会带
+        # 这三个字段，缺失时这行不显示，不影响其余内容。
+        diag_line = ""
+        fsv, gs, uc = data.get("first_seen_volume"), data.get("growth_seconds"), data.get("update_count")
+        if fsv is not None and gs is not None and uc is not None:
+            diag_line = f"\n累计轨迹：首见{float(fsv):.1f}BTC → {volume:.1f}BTC，{float(gs):.1f}秒内{int(uc)}次更新"
+
+        msg = (
+            f"{whale_hdr} **{level_cn}{dir_cn}** {dir_icon} | {market_label}\n\n"
+            f"**{volume:.1f} BTC**（约 {usd_str} USDT）\n"
+            f"成交价：**{price_range}**\n"
+            f"类型：ATAS同价同向多笔聚合单{diag_line}\n"
+            f"\n**订单流上下文**{poc_pos}{delta_line}{cvd_line}\n"
+            f"\n**研判** {judge}\n"
+            f"\n⏰ {time_str}（北京）"
+        )
+        await async_send(msg)
+        conn = sqlite3.connect(_ATAS_DB, timeout=5)
+        conn.execute("UPDATE atas_large_trades SET telegram_sent=1 WHERE id=?", (record_id,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log.warning(f"[ATAS] trade tg error: {e}")
+
+
+@app.get("/atas/status")
+async def atas_status():
+    """
+    ATAS 数据接收状态。
+    顶层字段（atas_bridge_online / last_bar）保持原语义不变——只反映
+    币安永续这一路，跟现有面板 Vue3 代码（atasStatus）完全兼容，不用同步改前端。
+    新增 by_market：四路（币安/OKX × 现货/合约）各自最后收到数据的时间，
+    用于这次多市场上线后的验证；前端暂不消费，以后要做四路可视化时再接。
+    """
+    try:
+        conn = sqlite3.connect(_ATAS_DB, timeout=3)
+
+        last_sig = conn.execute(
+            'SELECT timestamp, raw_payload, created_at FROM atas_signals ORDER BY id DESC LIMIT 1'
+        ).fetchone()
+        # 顶层 last_bar：固定看 binance/perp，保持与旧版语义一致
+        last_bar = conn.execute(
+            "SELECT timestamp, delta, poc_price, created_at FROM atas_bars "
+            "WHERE exchange='binance' AND market_type='perp' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        today_signals = conn.execute(
+            "SELECT COUNT(*) FROM atas_signals WHERE date(created_at)=date('now')"
+        ).fetchone()[0]
+        today_bars = conn.execute(
+            "SELECT COUNT(*) FROM atas_bars WHERE date(created_at)=date('now')"
+        ).fetchone()[0]
+        today_trades = conn.execute(
+            "SELECT COUNT(*) FROM atas_large_trades WHERE date(created_at)=date('now')"
+        ).fetchone()[0]
+
+        # 四路明细：每个 (exchange, market_type) 今天最后一条 bar 的时间
+        by_market_rows = conn.execute("""
+            SELECT exchange, market_type, MAX(created_at) AS last_at, COUNT(*) AS cnt
+            FROM atas_bars
+            WHERE date(created_at) = date('now')
+            GROUP BY exchange, market_type
+        """).fetchall()
+        conn.close()
+
+        bar_connected   = False
+        bar_minutes_ago = None
+        if last_bar and last_bar[3]:
+            try:
+                dt = datetime.fromisoformat(last_bar[3])
+                bar_minutes_ago = int((datetime.now() - dt).total_seconds() / 60)
+                bar_connected   = bar_minutes_ago < 10
+            except Exception:
+                pass
+
+        by_market = {}
+        for exch, mkt, last_at, cnt in by_market_rows:
+            mins_ago = None
+            online = False
+            if last_at:
+                try:
+                    dt = datetime.fromisoformat(last_at)
+                    mins_ago = int((datetime.now() - dt).total_seconds() / 60)
+                    online = mins_ago < 10
+                except Exception:
+                    pass
+            by_market[f"{exch}_{mkt}"] = {
+                "online": online, "minutes_ago": mins_ago, "bars_today": cnt,
+            }
+
+        return {
+            'phase':               'Phase 1-3 + 多市场标签（2026-07-01）',
+            'atas_bridge_online':  bar_connected,
+            'cooldown_status':     {k: int(_ATAS_COOLDOWN_SEC - (datetime.now(SGT).timestamp()-v))
+                                    for k, v in _atas_cooldown.items()
+                                    if datetime.now(SGT).timestamp()-v < _ATAS_COOLDOWN_SEC},
+            'last_signal': {
+                'timestamp':   last_sig[0],
+                'payload':     json.loads(last_sig[1]) if last_sig and last_sig[1] else {},
+                'received_at': last_sig[2],
+            } if last_sig else None,
+            'last_bar': {
+                'timestamp':   last_bar[0],
+                'delta':       last_bar[1],
+                'poc_price':   last_bar[2],
+                'minutes_ago': bar_minutes_ago,
+            } if last_bar else None,
+            'today_stats': {
+                'signals':      today_signals,
+                'bars':         today_bars,
+                'large_trades': today_trades,
+            },
+            'by_market': by_market,
+        }
+    except Exception as e:
+        return {'error': str(e)}
+
+
+@app.post("/atas/bar")
+async def atas_bar(request: Request):
+    """接收 AtasBridge.dll 推送的 K 线摘要数据（含 exchange/market_type 标签）"""
+    try:
+        data = await request.json()
+    except Exception:
+        return {"status": "error", "detail": "invalid json"}
+
+    exchange, market = _atas_resolve_market(data)
+
+    try:
+        conn = sqlite3.connect(_ATAS_DB, timeout=5)
+        conn.execute("""
+            INSERT INTO atas_bars
+            (timestamp, timeframe, exchange, market_type,
+             open, high, low, close, volume,
+             ask_vol, bid_vol, delta, cumulative_delta,
+             max_delta, min_delta, max_oi, min_oi, oi_change,
+             poc_price, max_vol_price, max_pos_delta_price, max_neg_delta_price,
+             footprint_json, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (
+            data.get("timestamp"),
+            data.get("timeframe", "5m"),
+            exchange, market,
+            data.get("open"),  data.get("high"),
+            data.get("low"),   data.get("close"),
+            data.get("volume"),
+            data.get("ask_vol"),  data.get("bid_vol"),
+            data.get("delta"),    data.get("cumulative_delta"),
+            data.get("max_delta"), data.get("min_delta"),
+            data.get("max_oi"),    data.get("min_oi"),
+            data.get("oi_change"),
+            data.get("poc_price"),     data.get("max_vol_price"),
+            data.get("max_pos_delta_price"), data.get("max_neg_delta_price"),
+            json.dumps(data.get("top_levels")) if data.get("top_levels") else None,
+            datetime.now(SGT).strftime("%Y-%m-%d %H:%M:%S")
+        ))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log.warning(f"[ATAS] bar 写库失败: {e}")
+        return {"status": "error", "detail": str(e)}
+
+    log.info(f"[ATAS] bar [{exchange}/{market}] {data.get('timestamp')} delta={data.get('delta')} poc={data.get('poc_price')}")
+    return {"status": "ok"}
