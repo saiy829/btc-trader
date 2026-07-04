@@ -25,6 +25,9 @@ v9 更新（Phase 7A-2）：
 - 环比对比改为读 signal_scores 表上一条记录（代替 AI 记忆上一次简报的数字）
 - 早盘第11节三档标题【保守档】【稳健档】【激进档】明确禁止用 ### 等 Markdown
   标题语法（此前 AI 会给这三个标题套 Markdown 标题导致 WordPress 渲染异常）
+v9 补充裁定（2026-07-04）：
+- build_prompt() 额外算出大户多空比实时REST快照传给 signal_score.compute_and_save()，
+  作为 DB 表数据 STALE 时的降级兜底（详见 utils/signal_score.py 文档字符串）
 """
 import anthropic
 from utils.helpers import setup_logger, get_env
@@ -258,9 +261,14 @@ def build_prompt(binance, mf, ib, etf, cme, vp, session):
     # ── [Phase 7A-2] 综合信号分：代码确定性计算，写入 signal_scores 表，
     # AI 只负责引用解释，不再自己心算（原因见模块顶部文档字符串）
     _market_meta = binance.get("market_meta", {}) or {}
+    # 大户多空比的实时REST快照（与上面 DATA 数据块里"大户：xx%多"用的是同一个 ls），
+    # 仅当 signal_score 里 DB 表数据 STALE(>15分钟) 时才会被启用做降级兜底
+    _rest_ls_r = None
+    if ls.get("top_long_pct") and ls.get("top_short_pct"):
+        _rest_ls_r = ls["top_long_pct"] / ls["top_short_pct"]
     _sig = signal_score.compute_and_save(
         _market_meta.get("fr_zscore"), etf, cb_prem,
-        _market_meta.get("regime", ""), session
+        _market_meta.get("regime", ""), session, rest_ls_ratio_r=_rest_ls_r
     )
     SIGNAL_BLOCK = signal_score.format_authoritative_block(_sig)
 

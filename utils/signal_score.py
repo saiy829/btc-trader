@@ -5,26 +5,29 @@
 对不上——大模型心算不可靠。本模块把六维打分和加权求和全部改成确定性代码计算，
 AI 只负责引用结果并解释市场含义，不再自己算数。
 
-数据来源：
+数据来源原则：一律优先用注入 AI 数据块的同一份数据，避免"分数和叙述打架"：
   - ETF净流 / CB溢价：由 ai_analyst/briefing.py 的 build_prompt() 直接传入
-    （这两个值来自外部 API 采集，不在本地滚动历史表里）
+    （这两个值来自外部 API 采集，不在本地滚动历史表里，且与 DATA 数据块里
+    展示给 AI 看的是同一个变量）
   - 资金费率Z-score：直接复用 briefing.binance_briefing_data.get_market_meta()
-    的 fr_zscore，不在本模块重新计算，避免和其他地方显示的 Z 值产生数值漂移
-  - OI象限 / 近1小时OI变化率 / 大户多空比：本模块直接查询 btc_history.db 的
-    binance_structure / binance_oi / binance_ls_top 三张表（与
-    briefing/binance_briefing_data.py 用同一批表，口径一致）
-    注：大户多空比用 binance_ls_top.ls_ratio 字段本身（Binance按持仓量计算的
-    比值），不是 61.7%/38.3% 账户占比换算出来的比值——实测两者差异很大
-    （2026-07-04早盘实例：1.231 vs 61.7/38.3=1.611），账户占比换算会导致
-    分类档位判断错误。
+    的 fr_zscore，不在本模块重新计算，避免和 market_ctx 文本里显示的 Z 值
+    产生数值漂移（两者同一次 get_binance_context() 调用产生）
+  - OI象限 / 近1小时OI变化率 / 近1小时价格变化：本模块直接查询 btc_history.db
+    的 binance_structure / binance_oi 两张表（与 briefing/binance_briefing_data.py
+    用同一批表，口径一致）
+  - 大户多空比：优先用 binance_ls_top.ls_ratio 字段本身（Binance按持仓量计算的
+    比值，不是 61.7%/38.3% 账户占比换算出来的比值——实测两者差异很大，
+    2026-07-04早盘实例：1.231 vs 61.7/38.3=1.611，账户占比换算会导致分类档位
+    判断错误）。若该表最新记录超过 SCORE_CONFIG["ls_stale_sec"]（15分钟）未更新，
+    视为 STALE，降级改用调用方传入的实时 REST 快照（build_prompt 里的
+    binance["ls_ratio"]），并在 detail_json 标注 ls_source
 
 结果写入 signal_scores 表，供 Phase 5B 回测分数与胜率的相关性。
 
-已知设计缺口（见 Phase 7A-2 任务对话记录，未来校准用）：
-  三因子状态实际有14种细分标签，任务卡SCORE_CONFIG.regime_map只定义了6个
-  关键词类别的分数。未覆盖的7种（多头/空头被迫平仓、横盘多头/空头拥挤、
-  多头拥挤承压、空头拥挤承托、趋势延续-均衡）统一归入"混合信号"记0分，
-  这是当前版本的保守处理，不是遗漏。
+三因子状态14档完整映射（2026-07-04 补充裁定，权威定义，数值改动需用户确认）：
+  见 SCORE_CONFIG["regime_map"]。防御规则：未来出现表里没有的新标签，
+  一律记0分 + 写 WARNING 日志 + detail_json 标注"未映射状态:标签名"，
+  绝不猜测赋分（与 AtasBridge 的 Unset 默认值同一设计哲学：宁可报警不可编数）。
 """
 import json
 import sqlite3
@@ -79,10 +82,30 @@ SCORE_CONFIG = {
     "cb_premium": {
         "mult": 0.5, "clamp": 50,   # 溢价USD × 0.5，clamp ±50
     },
+    # 三因子状态14档完整映射（2026-07-04 补充裁定，权威定义，禁止自行调整）
     "regime_map": {
-        "真实建仓": 50, "健康趋势": 40, "混合信号": 0,
-        "挤压酝酿": -10, "过热": -40, "去杠杆清洗": -40,
+        "真实建仓":            50,
+        "健康趋势_多方主导":    40,
+        "趋势延续_涨":          30,   # 近1小时价格上涨
+        "趋势延续_平":           0,   # |涨跌|<0.05%
+        "趋势延续_跌":         -30,   # 近1小时价格下跌
+        "空头拥挤承托":         35,
+        "横盘空头拥挤":         25,
+        "空头被迫平仓":         15,
+        "混合信号":              0,
+        "挤压酝酿":            -10,
+        "横盘多头拥挤":        -25,
+        "多头拥挤承压":        -35,
+        "过热":                -40,
+        "去杠杆清洗":          -40,
+        "健康趋势_空方主导":   -40,
+        "多头被迫平仓":        -45,
     },
+    # 趋势延续档判定"平"的价格变化阈值（近1小时百分比）
+    "regime_trend_flat_pct": 0.05,
+    # 大户多空比数据新鲜度阈值：DB表最新记录超过这个秒数视为STALE，
+    # 降级改用 build_prompt 传入的实时REST快照（2026-07-04 补充裁定）
+    "ls_stale_sec": 900,
     "label_thresholds": {
         "neutral": 20,  # |s|<=20 → 中性/信号弱
         "strong":  50,  # 20<|s|<=50 → 偏多/偏空；|s|>50 → 强烈偏多/强烈偏空
@@ -110,7 +133,11 @@ def _q(sql: str, params: tuple = ()):
 
 def _query_market_snapshot():
     """
-    直接查 btc_history.db，取当前象限 / 近1小时OI变化率(%) / 大户持仓多空比ls_ratio。
+    直接查 btc_history.db，取：
+      - 当前象限
+      - 近1小时OI变化率(%)
+      - 近1小时价格变化率(%)（供"趋势延续"档判定方向用，来自 binance_structure.mark_px）
+      - 大户持仓多空比 ls_ratio + 该记录距今秒数（供新鲜度判断用）
     与 briefing/binance_briefing_data.py 用同一批表，保持口径一致。
     任一字段缺失时返回 None，由调用方按"数据缺失"处理。
     """
@@ -127,10 +154,19 @@ def _query_market_snapshot():
     if len(oi_1h) >= 2 and oi_1h[0]["oi_usd"]:
         oi_chg_1h = (oi_1h[-1]["oi_usd"] - oi_1h[0]["oi_usd"]) / oi_1h[0]["oi_usd"] * 100
 
-    ls_top = _q("SELECT ls_ratio FROM binance_ls_top ORDER BY ts DESC LIMIT 1")
-    ls_ratio_r = ls_top[0]["ls_ratio"] if ls_top else None
+    px_1h = _q(
+        "SELECT mark_px FROM binance_structure WHERE ts >= ? ORDER BY ts ASC",
+        (now - 3600,)
+    )
+    price_chg_1h = None
+    if len(px_1h) >= 2 and px_1h[0]["mark_px"]:
+        price_chg_1h = (px_1h[-1]["mark_px"] - px_1h[0]["mark_px"]) / px_1h[0]["mark_px"] * 100
 
-    return quadrant, oi_chg_1h, ls_ratio_r
+    ls_top = _q("SELECT ts, ls_ratio FROM binance_ls_top ORDER BY ts DESC LIMIT 1")
+    ls_ratio_r = ls_top[0]["ls_ratio"] if ls_top else None
+    ls_age_sec = (now - ls_top[0]["ts"]) if ls_top else None
+
+    return quadrant, oi_chg_1h, price_chg_1h, ls_ratio_r, ls_age_sec
 
 
 # ── 六维打分函数（每个返回 (分数:int, 备注:str|None)）─────────────────────
@@ -205,27 +241,57 @@ def _score_cb_premium(cb_premium):
     return round(s), None
 
 
-def _score_regime(regime_label: str):
+def _score_regime(regime_label: str, price_chg_1h):
     """
-    三因子状态查表打分。任务卡只定义了6个关键词类别的分数，但实际系统
-    _regime_lookup() 会产出14种细分标签。这里用关键词匹配覆盖能对应上的
-    6类，其余（被迫平仓/横盘拥挤/拥挤承压承托/趋势延续等7种）统一按
-    "混合信号"处理记0分——不在SCORE_CONFIG范围内的类别不擅自定义新分数。
+    三因子状态14档完整查表打分（2026-07-04 补充裁定，权威定义）。
+    关键词互不重叠，匹配顺序不影响结果（已核对：没有一个关键词是另一个的子串）。
+    "趋势延续"档需要额外用近1小时价格变化的符号决定 +30/0/-30。
+    命中不了任何已知类别的新标签 → 记0分 + WARNING日志 + detail标注，
+    绝不猜测赋分。
     """
     m = SCORE_CONFIG["regime_map"]
     if not regime_label:
         return 0, "数据缺失"
+
     if "过热" in regime_label:
         return m["过热"], "过热"
     if "挤压酝酿" in regime_label:
         return m["挤压酝酿"], "挤压酝酿"
     if "真实" in regime_label and "建仓" in regime_label:
         return m["真实建仓"], "真实建仓"
+    if "多头被迫平仓" in regime_label:
+        return m["多头被迫平仓"], "多头被迫平仓"
+    if "空头被迫平仓" in regime_label:
+        return m["空头被迫平仓"], "空头被迫平仓"
     if "去杠杆" in regime_label:
         return m["去杠杆清洗"], "去杠杆清洗"
-    if "健康趋势" in regime_label:
-        return m["健康趋势"], "健康趋势"
-    return m["混合信号"], "混合信号（含SCORE_CONFIG未覆盖的细分类别，按0分处理）"
+    if "横盘多头拥挤" in regime_label:
+        return m["横盘多头拥挤"], "横盘多头拥挤"
+    if "横盘空头拥挤" in regime_label:
+        return m["横盘空头拥挤"], "横盘空头拥挤"
+    if "多头拥挤承压" in regime_label:
+        return m["多头拥挤承压"], "多头拥挤承压"
+    if "空头拥挤承托" in regime_label:
+        return m["空头拥挤承托"], "空头拥挤承托"
+    if "健康趋势" in regime_label and "多方主导" in regime_label:
+        return m["健康趋势_多方主导"], "健康趋势（多方主导）"
+    if "健康趋势" in regime_label and "空方主导" in regime_label:
+        return m["健康趋势_空方主导"], "健康趋势（空方主导）"
+    if "趋势延续" in regime_label:
+        flat_pct = SCORE_CONFIG["regime_trend_flat_pct"]
+        if price_chg_1h is None:
+            return m["趋势延续_平"], "趋势延续（均衡），近1小时价格变化数据缺失，按0分处理"
+        if abs(price_chg_1h) < flat_pct:
+            return m["趋势延续_平"], f"趋势延续（均衡），近1小时价格变化{price_chg_1h:+.3f}%<{flat_pct}%阈值"
+        if price_chg_1h > 0:
+            return m["趋势延续_涨"], f"趋势延续（均衡），近1小时价格上涨{price_chg_1h:+.3f}%"
+        return m["趋势延续_跌"], f"趋势延续（均衡），近1小时价格下跌{price_chg_1h:+.3f}%"
+    if "混合信号" in regime_label:
+        return m["混合信号"], "混合信号"
+
+    # ── 防御规则：未知新标签，绝不猜测赋分 ──────────────────────────────
+    logger.warning(f"signal_score: 三因子状态出现未映射标签 {regime_label!r}，按0分处理")
+    return 0, f"未映射状态:{regime_label}"
 
 
 def _label(score: int) -> str:
@@ -240,19 +306,37 @@ def _label(score: int) -> str:
 
 # ── 主计算入口 ───────────────────────────────────────────────────────────
 
-def compute_scores(fr_zscore, etf: dict, cb_premium, regime_label: str) -> dict:
+def compute_scores(fr_zscore, etf: dict, cb_premium, regime_label: str,
+                    rest_ls_ratio_r=None) -> dict:
     """
     完整六维计算（含三因子状态），composite/label 以此为准。
     regime_label 从调用方传入的 binance["market_meta"]["regime"] 获取。
+    rest_ls_ratio_r：build_prompt 里实时REST快照算出的大户多空比（可选），
+    仅当 DB 里的 binance_ls_top 数据 STALE（超过 ls_stale_sec）时才会启用，
+    作为降级兜底，避免综合分和AI正文引用的数据块完全脱节。
     """
-    quadrant, oi_chg_1h, ls_ratio_r = _query_market_snapshot()
+    quadrant, oi_chg_1h, price_chg_1h, ls_ratio_r, ls_age_sec = _query_market_snapshot()
+
+    stale_sec = SCORE_CONFIG["ls_stale_sec"]
+    ls_source = "db_5min"
+    if ls_ratio_r is None:
+        ls_source = "unavailable"
+        if rest_ls_ratio_r is not None:
+            ls_ratio_r = rest_ls_ratio_r
+            ls_source = "rest_fallback（DB无数据）"
+    elif ls_age_sec is not None and ls_age_sec > stale_sec:
+        if rest_ls_ratio_r is not None:
+            ls_ratio_r = rest_ls_ratio_r
+            ls_source = f"rest_fallback（DB数据STALE，{ls_age_sec}秒未更新）"
+        else:
+            ls_source = f"db_5min（STALE，{ls_age_sec}秒未更新，且无REST兜底数据）"
 
     etf_s,    etf_note    = _score_etf(etf)
     fr_s,     fr_note     = _score_funding_z(fr_zscore)
     quad_s,   quad_note   = _score_oi_quadrant(quadrant, oi_chg_1h)
     ls_s,     ls_note     = _score_ls_ratio(ls_ratio_r)
     cb_s,     cb_note     = _score_cb_premium(cb_premium)
-    regime_s, regime_note = _score_regime(regime_label)
+    regime_s, regime_note = _score_regime(regime_label, price_chg_1h)
 
     w = SCORE_CONFIG["weights"]
     composite = round(
@@ -268,7 +352,8 @@ def compute_scores(fr_zscore, etf: dict, cb_premium, regime_label: str) -> dict:
         "ls_s": ls_s, "cb_s": cb_s, "regime_s": regime_s,
         "detail": {
             "raw": {
-                "quadrant": quadrant, "oi_chg_1h": oi_chg_1h, "ls_ratio_r": ls_ratio_r,
+                "quadrant": quadrant, "oi_chg_1h": oi_chg_1h, "price_chg_1h": price_chg_1h,
+                "ls_ratio_r": ls_ratio_r, "ls_source": ls_source, "ls_age_sec": ls_age_sec,
                 "fr_zscore": fr_zscore, "cb_premium": cb_premium,
                 "regime_label": regime_label,
                 "etf_total_yest": etf.get("total_yest") if etf else None,
@@ -344,13 +429,14 @@ def save_score(session: str, result: dict) -> None:
         logger.warning(f"signal_scores 写入失败: {e}")
 
 
-def compute_and_save(fr_zscore, etf: dict, cb_premium, regime_label: str, session: str) -> dict:
+def compute_and_save(fr_zscore, etf: dict, cb_premium, regime_label: str, session: str,
+                      rest_ls_ratio_r=None) -> dict:
     """
     briefing.py 应该调用的唯一入口：
     读取上一条记录（环比用）→ 计算六维+综合分 → 写入 signal_scores → 一起返回。
     """
     prev = get_previous_score()
-    result = compute_scores(fr_zscore, etf, cb_premium, regime_label)
+    result = compute_scores(fr_zscore, etf, cb_premium, regime_label, rest_ls_ratio_r)
     save_score(session, result)
     result["prev"] = prev
     return result
