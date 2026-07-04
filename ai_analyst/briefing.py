@@ -1,5 +1,5 @@
 """
-Claude AI 分析模块 v9
+Claude AI 分析模块 v10
 4种会话：morning / morning_monday / europe / evening / ondemand
 v6 更新：
 - max_tokens 按 session 分级（早盘13节内容多，提高到8192防止截断）
@@ -28,7 +28,12 @@ v9 更新（Phase 7A-2）：
 v9 补充裁定（2026-07-04）：
 - build_prompt() 额外算出大户多空比实时REST快照传给 signal_score.compute_and_save()，
   作为 DB 表数据 STALE 时的降级兜底（详见 utils/signal_score.py 文档字符串）
+v10 更新（Phase 7A-3）：
+- generate_briefing() 返回前新增 _sanitize() 后处理：prompt 里反复要求 AI 不用
+  Markdown，但 AI 偶尔仍会漏用 ### 或 **，加一道代码兜底清洗，不依赖 AI 是否听话
 """
+import re
+
 import anthropic
 from utils.helpers import setup_logger, get_env
 from utils import signal_score
@@ -592,6 +597,26 @@ IB参考：${ib.get("ib_low",0):,.0f}-${ib.get("ib_high",0):,.0f} | {ib.get("ope
 5.【一句话总结】15字以内"""
 
 
+# ── Markdown 清洗器（Phase 7A-3，代码兜底）──────────────────────────────
+# prompt 里已经反复要求 AI 不要用 Markdown，但 AI 偶尔还是会漏用 ### 或 **，
+# 这里在返回前做最后一道代码清洗，不依赖 AI 是否听话。
+
+def _sanitize(text: str) -> str:
+    """
+    清洗简报正文里残留的 Markdown 符号：
+    1. 每行开头 1~6 个 # 及其后空格 → 删除，保留行内其余文字
+    2. 成对的 ** 包裹 → 去掉星号保留文字；残留的孤立 ** 也删掉
+    不动 > - = 等我们自己的排版符号，不动数字和 $ 金额。
+    """
+    if not text:
+        return text
+    lines = [re.sub(r'^#{1,6}\s*', '', line) for line in text.split("\n")]
+    text = "\n".join(lines)
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+    text = text.replace("**", "")
+    return text
+
+
 def generate_briefing(binance, mf=None, ib=None,
                       etf=None, cme=None, vp=None, session="ondemand"):
     try:
@@ -605,7 +630,7 @@ def generate_briefing(binance, mf=None, ib=None,
             max_tokens=max_tok,
             messages=[{"role": "user", "content": prompt}]
         )
-        result = msg.content[0].text
+        result = _sanitize(msg.content[0].text)
         stop_reason = msg.stop_reason
         logger.info(f"简报生成完成（{len(result)} 字）[{session}] stop_reason={stop_reason}")
         if stop_reason == "max_tokens":
