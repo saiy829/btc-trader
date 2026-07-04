@@ -16,7 +16,7 @@
 import math
 
 MAINTENANCE_MARGIN_RATE = 0.004  # 维持保证金率，估算值，各交易所实际值不同且分档
-LEVERAGES = (5, 10, 20)
+LEVERAGES = (2, 3, 5, 10, 20)
 STOP_TOO_CLOSE_PCT = 0.15  # 止损距离百分比阈值，低于此值提示"止损过近"
 MIN_STEP_BTC = 0.001
 
