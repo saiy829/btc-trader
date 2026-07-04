@@ -611,6 +611,7 @@ tail -20 /opt/btc-trader/logs/git_sync.log
 | 2026-07-04 | Phase 7B：新增 Telegram /pos 仓位风控计算命令（utils/position_calc.py 纯计算模块），固定风险比例计算仓位+2/3/5/10/20x保证金/估算强平价+危险杠杆预警+止损过近提示 |
 | 2026-07-04 | Phase 7A-2：综合信号分改为 utils/signal_score.py 代码确定性计算（修复AI心算不一致），落库 signal_scores 表供Phase 5B回测，早盘三档标题改纯文本行禁止Markdown标题 |
 | 2026-07-04 | Phase 7A-2补充裁定：三因子状态扩展为14档完整映射+未映射标签防御规则；大户多空比新增15分钟新鲜度降级(STALE改用REST快照) |
+| 2026-07-04 | Phase 7A-3：ai_analyst/briefing.py 新增 _sanitize() 代码兜底，清洗AI偶尔残留的###标题和**加粗**Markdown符号，不依赖AI是否听话 |
 
 ---
 
