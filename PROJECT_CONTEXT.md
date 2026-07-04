@@ -190,6 +190,10 @@ LIQ_HOURLY_USD=3000000     # 1小时累计预警：$300万
 
 # 启动安全验证（2026-06-27 新增）
 BTC_TRADER_KEY=...         # 64位随机密钥，不在GitHub上
+
+# /pos 仓位风控命令默认值（2026-07-04 Phase 7B 新增，改后重启 btc-briefing 生效）
+POS_ACCOUNT_USDT=10000     # 默认账户资金（USDT），命令不填第3个参数时使用
+POS_RISK_PCT=1.0           # 默认单笔风险百分比，命令不填第4个参数时使用
 ```
 
 ---
@@ -221,6 +225,14 @@ BTC_TRADER_KEY=...         # 64位随机密钥，不在GitHub上
 | `europe` | 北京时间 15:00（UTC 07:00） | 自动定时 |
 | `evening` | 北京时间 20:30（UTC 12:30） | 自动定时 |
 | `ondemand` | 随时 | TG 发送 `/b` 或 `简报` |
+
+### Telegram 命令清单：
+
+| 命令 | 功能 | chat_id 校验 |
+|---|---|---|
+| `/b` 或 `B` 或发"简报" | 立刻生成实时简报（ondemand） | 是 |
+| `/status` | 查看系统运行状态 | 是 |
+| `/pos <入场价> <止损价> [资金USDT] [风险%]` | 仓位风控计算（2026-07-04 Phase 7B 新增，纯本地计算不调用外部API，见 `utils/position_calc.py`） | 是 |
 
 ### 简报主流程 `daily_briefing.py` — 7步骤：
 
@@ -549,6 +561,7 @@ tail -20 /opt/btc-trader/logs/git_sync.log
 | 2026-06-27 | git_sync.sh VPS→GitHub 每日 03:00 自动同步 |
 | 2026-06-27 | /root/btc-deploy 管理一次性脚本，保持项目目录整洁 |
 | 2026-07-04 | Phase 7A：AI Prompt 升级——第1节评级新增综合信号分（-100~+100，早盘展开六维拆解，欧盘/美盘/按需一行对比）；早盘第11节交易计划升级为保守/稳健/激进三档方案（多空各三档，激进档仓位减半，D评级全部观望） |
+| 2026-07-04 | Phase 7B：新增 Telegram /pos 仓位风控计算命令（utils/position_calc.py 纯计算模块），固定风险比例计算仓位+5/10/20x保证金/估算强平价+危险杠杆预警+止损过近提示 |
 
 ---
 
