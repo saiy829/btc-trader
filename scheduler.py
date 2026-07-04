@@ -9,6 +9,7 @@ from telegram.ext import (Application, CommandHandler,
                           MessageHandler, filters, ContextTypes)
 from utils.helpers import setup_logger, get_env, now_sgt
 from daily_briefing import run as run_briefing
+from utils import position_calc
 
 logger  = setup_logger("scheduler")
 CHAT_ID = get_env("TELEGRAM_CHAT_ID")
@@ -64,8 +65,28 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"欧盘简报：每天 SGT 15:00\n"
         f"美盘简报：每天 SGT 20:30\n"
         f"─────────────────\n"
-        f"发送 /b 立刻生成简报"
+        f"发送 /b 立刻生成简报\n"
+        f"发送 /pos <入场价> <止损价> [资金USDT] [风险%] 计算仓位风控方案"
     )
+
+
+async def cmd_pos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/pos 命令 → 仓位风控计算（固定风险比例，纯本地计算，无网络请求）"""
+    if str(update.effective_chat.id) != str(CHAT_ID):
+        return
+    try:
+        default_account = float(get_env("POS_ACCOUNT_USDT", "10000"))
+        default_risk = float(get_env("POS_RISK_PCT", "1.0"))
+        result = position_calc.parse_and_calc(
+            context.args, default_account, default_risk
+        )
+        reply = position_calc.format_message(result)
+    except position_calc.PositionCalcError as e:
+        reply = f"{position_calc.USAGE_TEXT}\n\n错误：{e}"
+    except Exception as e:
+        logger.error(f"/pos 计算异常: {e}")
+        reply = f"{position_calc.USAGE_TEXT}\n\n错误：计算失败，请检查参数"
+    await update.message.reply_text(reply)
 
 
 # ── 启动通知 ─────────────────────────────────────────────────────
@@ -110,6 +131,7 @@ def main():
     app.add_handler(CommandHandler("b",      cmd_briefing))
     app.add_handler(CommandHandler("B",      cmd_briefing))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("pos",    cmd_pos))
     app.add_handler(MessageHandler(
         filters.TEXT & filters.Regex(r"^简报$") & ~filters.COMMAND,
         cmd_briefing
