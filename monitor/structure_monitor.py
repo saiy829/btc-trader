@@ -7,6 +7,8 @@ Supervisor 服务名：btc-structure-monitor
 监控内容（与现有监控互补，不重复）：
   ✅ Q1/Q2 象限确认进入（连续 2 次 = 10 分钟稳定）→ TG 推送
   ✅ 大户多空比极端值（>3.0 偏多 / <0.5 偏空）→ TG 推送
+  ✅ 周一 TradFi 周初开盘窗口插针（北京时间夏令时05:00/冬令时06:00 至08:00，
+     扫过 PDH/PDL 又收回）→ TG 推送（2026-07 新增，见 monday_sweep_loop）
 
 不覆盖（已有服务处理）：
   ❌ 资金费率极端值 → btc-funding-monitor
@@ -25,6 +27,8 @@ import sqlite3
 import logging
 import time
 import os
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from collections import deque
 from dotenv import load_dotenv
@@ -39,6 +43,14 @@ CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 COOLDOWN_QUAD = 3600   # 象限告警冷却：60 分钟
 COOLDOWN_LS   = 7200   # 多空比告警冷却：120 分钟
 CHECK_INTERVAL = 360   # 检查间隔：6 分钟
+
+# ── 周一 TradFi 周初开盘窗口插针检测参数 ──────────────────────────────
+FUTURE_BASE   = "https://fapi.binance.com"
+SYMBOL        = "BTCUSDT"
+SWEEP_BREACH_MIN_PCT = float(os.getenv("SWEEP_BREACH_MIN_PCT", "0.03"))
+SWEEP_CHECK_INTERVAL = 60    # 窗口内检查间隔：60 秒
+SWEEP_IDLE_INTERVAL  = 60    # 窗口外休眠间隔：60 秒（按分钟粒度判断是否进窗口）
+SWEEP_LOOKBACK_MIN   = 15    # 插针判定回看最近 15 分钟
 
 logging.basicConfig(
     level=logging.INFO,
@@ -199,6 +211,168 @@ def _build_ls_msg(ls: dict, s: dict, direction: str) -> str:
 
 
 # ══════════════════════════════════════════════════
+#  周一 TradFi 周初开盘窗口插针检测
+#  （与 ai_analyst/briefing.py._monday_open_window() 同款夏令时判断逻辑）
+# ══════════════════════════════════════════════════
+
+def _monday_window_start_hour() -> int:
+    """周一开盘窗口起点（北京时间小时数），随美东夏令时自动切换。
+    夏令时 -> 05:00 起；冬令时 -> 06:00 起。窗口终点固定 08:00（IB 起点）。"""
+    try:
+        ny = datetime.now(ZoneInfo("America/New_York"))
+        return 5 if ny.dst() else 6
+    except Exception:
+        return 5
+
+
+def _in_monday_window(now_bj: datetime) -> bool:
+    """判断给定的北京时间是否落在周一 TradFi 周初开盘窗口内（窗口起点-08:00）。"""
+    if now_bj.weekday() != 0:   # 0 = 周一
+        return False
+    start_hour = _monday_window_start_hour()
+    return start_hour <= now_bj.hour < 8
+
+
+async def _fetch_klines(session: aiohttp.ClientSession, interval: str, limit: int):
+    """拉取 Binance USDT永续 K线（REST，德国IP直连正常）"""
+    url = f"{FUTURE_BASE}/fapi/v1/klines"
+    params = {"symbol": SYMBOL, "interval": interval, "limit": limit}
+    async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        resp.raise_for_status()
+        return await resp.json()
+
+
+async def _get_pdh_pdl(session: aiohttp.ClientSession):
+    """
+    取前一根日线（UTC自然日00:00-24:00，即北京时间昨日08:00-今日08:00，
+    与现有 Market Profile / IB 定义一致）的 high/low。
+    用 limit=3 取 k[-2]（而非 limit=2 取 k[0]）：与
+    data_collector/binance_data.py 的 get_yesterday_ohlcv() 保持同一套已验证
+    写法，避免重新引入该函数注释里提到的历史踩坑。
+    """
+    try:
+        k = await _fetch_klines(session, "1d", 3)
+        y = k[-2]
+        return float(y[2]), float(y[3])   # high, low
+    except Exception as e:
+        log.warning(f"周一插针监控：PDH/PDL 获取失败: {e}")
+        return None, None
+
+
+def _check_sweep(klines_1m: list, pdh: float, pdl: float, breach_min_pct: float):
+    """
+    检测最近 SWEEP_LOOKBACK_MIN 分钟内是否出现"扫过 PDH/PDL 又收回"的插针。
+    klines_1m: Binance 1m K线列表（按时间升序），至少需要 lookback 根数据。
+    返回 (direction, extreme_price, breach_pct) 或 None；
+    direction: "BSL"（上扫 PDH）/ "SSL"（下扫 PDL）。
+    """
+    if not klines_1m or pdh is None or pdl is None:
+        return None
+    recent = klines_1m[-SWEEP_LOOKBACK_MIN:]
+    latest_close = float(klines_1m[-1][4])
+
+    highs = [float(k[2]) for k in recent]
+    max_high = max(highs)
+    if max_high > pdh:
+        breach_pct = (max_high - pdh) / pdh * 100
+        if breach_pct >= breach_min_pct and latest_close < pdh:
+            return ("BSL", max_high, breach_pct)
+
+    lows = [float(k[3]) for k in recent]
+    min_low = min(lows)
+    if min_low < pdl:
+        breach_pct = (pdl - min_low) / pdl * 100
+        if breach_pct >= breach_min_pct and latest_close > pdl:
+            return ("SSL", min_low, breach_pct)
+
+    return None
+
+
+def _build_sweep_msg(direction: str, pd_price: float, extreme_price: float,
+                      breach_pct: float, current_price: float, now_bj: datetime) -> str:
+    """
+    周一插针 TG 消息（HTML模式，风格与 _build_quad_msg 一致）。
+    不用 🟢/🔴：那是本文件/系统里爆仓和涨跌方向的固定配色语义，
+    插针清扫不代表趋势方向，用中性提示符号避免混淆。
+    """
+    dir_label = "上扫 BSL（清扫多头止损）" if direction == "BSL" else "下扫 SSL（清扫空头止损）"
+    pd_label  = "PDH" if direction == "BSL" else "PDL"
+    time_str  = now_bj.strftime("%Y-%m-%d %H:%M")
+
+    lines = [
+        f"📌 <b>周一开盘窗口流动性清扫 · {dir_label}</b>",
+        f"",
+        f"{pd_label}：<b>${pd_price:,.0f}</b>",
+        f"插针极值：<b>${extreme_price:,.0f}</b>（突破 {breach_pct:.3f}%）",
+        f"当前价：<b>${current_price:,.0f}</b>",
+        f"发生时间：{time_str}（北京时间）",
+        f"",
+        f"周一开盘窗口流动性清扫，IB（08:00）形成前勿追第一波方向，"
+        f"等待 IB 与开盘类型确认",
+        f"",
+        f"<i>辅助判断信号，非交易建议</i>",
+    ]
+    return "\n".join(lines)
+
+
+async def monday_sweep_loop():
+    """
+    独立协程：仅周一 TradFi 周初开盘窗口内（窗口起点-08:00 北京时间）检测插针。
+    窗口外每分钟检查一次是否进入窗口即返回休眠，不拉取任何行情数据。
+    """
+    log.info(
+        f"周一开盘窗口插针监控已启动（窗口：周一 夏令时05:00/冬令时06:00 至 08:00 "
+        f"北京时间，突破阈值 {SWEEP_BREACH_MIN_PCT}%）"
+    )
+
+    sweep_alerted: dict = {}   # {"YYYY-MM-DD_方向": True}，冷却用
+    cached_date = None
+    pdh = pdl = None
+
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                now_bj = datetime.now(ZoneInfo("Asia/Shanghai"))
+
+                if not _in_monday_window(now_bj):
+                    await asyncio.sleep(SWEEP_IDLE_INTERVAL)
+                    continue
+
+                date_str = now_bj.strftime("%Y-%m-%d")
+                if cached_date != date_str:
+                    pdh, pdl = await _get_pdh_pdl(session)
+                    cached_date = date_str
+                    if pdh is not None and pdl is not None:
+                        log.info(f"周一插针监控：窗口启动，PDH=${pdh:,.0f} PDL=${pdl:,.0f}")
+
+                if pdh is None or pdl is None:
+                    log.warning("周一插针监控：本窗口 PDH/PDL 不可用，跳过本次检测")
+                    await asyncio.sleep(SWEEP_CHECK_INTERVAL)
+                    continue
+
+                klines_1m = await _fetch_klines(session, "1m", 16)
+                result = _check_sweep(klines_1m, pdh, pdl, SWEEP_BREACH_MIN_PCT)
+                if result:
+                    direction, extreme_price, breach_pct = result
+                    key = f"{date_str}_{direction}"
+                    if key not in sweep_alerted:
+                        current_price = float(klines_1m[-1][4])
+                        pd_price = pdh if direction == "BSL" else pdl
+                        msg = _build_sweep_msg(
+                            direction, pd_price, extreme_price,
+                            breach_pct, current_price, now_bj
+                        )
+                        await send_tg(session, msg)
+                        sweep_alerted[key] = True
+                        log.info(f"周一插针告警已发送: {direction} 突破{breach_pct:.3f}%")
+
+            except Exception as e:
+                log.error(f"周一插针监控循环异常: {e}", exc_info=True)
+
+            await asyncio.sleep(SWEEP_CHECK_INTERVAL)
+
+
+# ══════════════════════════════════════════════════
 #  监控主循环
 # ══════════════════════════════════════════════════
 
@@ -295,8 +469,12 @@ async def monitor_loop():
 #  入口
 # ══════════════════════════════════════════════════
 
+async def _main():
+    await asyncio.gather(monitor_loop(), monday_sweep_loop())
+
+
 if __name__ == "__main__":
     if not BOT_TOKEN or not CHAT_ID:
         log.error("TELEGRAM_BOT_TOKEN 或 TELEGRAM_CHAT_ID 未配置，检查 .env")
         exit(1)
-    asyncio.run(monitor_loop())
+    asyncio.run(_main())

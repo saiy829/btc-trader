@@ -499,6 +499,10 @@ subprocess.run(['wp', 'post', 'create', ...])
 
 ### 象限+多空比监控（btc-structure-monitor）：
 - 结合 5 分钟象限（Q1/Q2/Q3/Q4）和多空比发送预警
+- 周一 TradFi 周初开盘窗口插针检测（2026-07 新增）：仅北京时间周一
+  夏令时05:00/冬令时06:00 至 08:00 激活，检测扫过 PDH/PDL 又收回的插针
+  （突破深度≥0.03%，可用 .env 的 SWEEP_BREACH_MIN_PCT 配置），
+  同方向每个周一窗口只报一次
 
 ### Binance 数据服务（btc-binance-data）：
 - 每 5 分钟采集并写入 SQLite：OI / Funding / 多空比 / 象限
@@ -591,6 +595,8 @@ tail -20 /opt/btc-trader/logs/git_sync.log
 - HVN/LVN：高/低成交量节点
 - BSL/SSL：Buy Side / Sell Side Liquidity（流动性猎取目标）
 - ICT 概念：AMD 模型、Order Block、FVG（公允价值缺口）、Judas Swing
+- 周一TradFi周初开盘窗口：北京夏令时05:00-07:00/冬令时06:00-08:00 = 全球FX周初开盘+CME Globex股指期货开盘；
+  周末薄流动性切换回正常深度，IB形成前（08:00前）的插针优先视为BSL/SSL流动性清扫，勿追第一波方向
 
 ---
 
@@ -613,6 +619,7 @@ tail -20 /opt/btc-trader/logs/git_sync.log
 | 2026-07-04 | Phase 7A-2补充裁定：三因子状态扩展为14档完整映射+未映射标签防御规则；大户多空比新增15分钟新鲜度降级(STALE改用REST快照) |
 | 2026-07-04 | Phase 7A-3：ai_analyst/briefing.py 新增 _sanitize() 代码兜底，清洗AI偶尔残留的###标题和**加粗**Markdown符号，不依赖AI是否听话 |
 | 2026-07-06 | Phase 7E：morning_monday 增加 TradFi 周初开盘窗口提示（全球外汇+CME Globex股指期货开盘，北京时间夏令时05:00-07:00/冬令时06:00-08:00自动切换，_monday_open_window()按美东dst()判断），提示常见BSL/SSL集中清扫 |
+| 2026-07-06 | 7E v2：structure_monitor 新增周一插针TG预警（扫PDH/PDL又收回，独立协程monday_sweep_loop与现有monitor_loop并行）；方法论文档同步补充窗口说明 |
 
 ---
 
