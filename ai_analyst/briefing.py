@@ -1,5 +1,5 @@
 """
-Claude AI 分析模块 v10
+Claude AI 分析模块 v11
 4种会话：morning / morning_monday / europe / evening / ondemand
 v6 更新：
 - max_tokens 按 session 分级（早盘13节内容多，提高到8192防止截断）
@@ -31,8 +31,15 @@ v9 补充裁定（2026-07-04）：
 v10 更新（Phase 7A-3）：
 - generate_briefing() 返回前新增 _sanitize() 后处理：prompt 里反复要求 AI 不用
   Markdown，但 AI 偶尔仍会漏用 ### 或 **，加一道代码兜底清洗，不依赖 AI 是否听话
+v11 更新（Phase 7E）：
+- morning_monday 的 MON_EXTRA 新增 TradFi 周初开盘窗口提示（全球外汇周初开盘+
+  CME Globex股指期货开盘，北京时间夏令时05:00-07:00/冬令时06:00-08:00自动切换，
+  _monday_open_window() 用 America/New_York 时区的 dst() 判断），提示该窗口
+  常见 BSL/SSL 集中清扫，要求第4节IB分析结合该窗口点评清扫痕迹
 """
 import re
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import anthropic
 from utils.helpers import setup_logger, get_env
@@ -60,6 +67,19 @@ def _fr_signal(r):
     elif r >= -0.05: return "偏空，谨慎追空"
     elif r >= -0.10: return "极度偏空，做空风险高"
     else:           return "超级极度偏空，挤空风险极高"
+
+
+def _monday_open_window() -> tuple:
+    """返回周一 TradFi 周初开盘窗口的北京时间区间（随美东夏令时自动切换）。
+    FX 周初开盘=美东周日17:00，Globex 股指期货=18:00。
+    夏令时 → 北京 05:00-07:00；冬令时 → 06:00-08:00。"""
+    try:
+        ny = datetime.now(ZoneInfo("America/New_York"))
+        if ny.dst():
+            return ("夏令时", "05:00", "07:00")
+        return ("冬令时", "06:00", "08:00")
+    except Exception:
+        return ("夏令时5-7点/冬令时6-8点", "05:00", "08:00")
 
 
 def _oi_signal(oi_chg, price_chg):
@@ -337,6 +357,7 @@ ${ext.get("cb_price",0):,.0f}  溢价：{cb_prem:+.0f} USD  {cb_sig}
 """
         MON_EXTRA = ""
         if session == "morning_monday":
+            dst_label, w_start, w_end = _monday_open_window()
             MON_EXTRA = f"""
 === 【周一 结构回顾 & CME 历史缺口追踪】===
 {_cme_block(cme)}
@@ -346,6 +367,13 @@ ${ext.get("cb_price",0):,.0f}  溢价：{cb_prem:+.0f} USD  {cb_sig}
 > 周一关注点：周末现货走势的延续/修复，而非 CME 开盘博弈
 > 若上周末出现大幅波动，周一 IB 可能偏宽 → 趋势日概率提升
 > 策略：以 IB 宽度和 PDH/PDL/PDC 结构为核心，忽略 CME 开盘时间节点
+
+周一开盘窗口提示（TradFi 周初重启）：
+> 北京时间 {w_start}-{w_end}（美东{dst_label}）= 全球外汇市场周初开盘 + CME Globex 股指期货开盘
+> 该窗口周末薄流动性切换回正常深度，常见 BSL/SSL 集中清扫（插针/假突破）
+> IB 形成前（08:00 前）出现的插针优先视为流动性清扫而非趋势，勿追第一波方向
+> 请在第4节 IB 分析中结合该窗口（{w_start}-08:00）的实际价格行为点评一句：
+  今晨是否出现清扫痕迹、清扫方向与 IB 突破方向是否一致
 """
 
         return f"""你是专业 BTC 永续合约交易分析师（Binance BTCUSDT），

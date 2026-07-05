@@ -612,6 +612,7 @@ tail -20 /opt/btc-trader/logs/git_sync.log
 | 2026-07-04 | Phase 7A-2：综合信号分改为 utils/signal_score.py 代码确定性计算（修复AI心算不一致），落库 signal_scores 表供Phase 5B回测，早盘三档标题改纯文本行禁止Markdown标题 |
 | 2026-07-04 | Phase 7A-2补充裁定：三因子状态扩展为14档完整映射+未映射标签防御规则；大户多空比新增15分钟新鲜度降级(STALE改用REST快照) |
 | 2026-07-04 | Phase 7A-3：ai_analyst/briefing.py 新增 _sanitize() 代码兜底，清洗AI偶尔残留的###标题和**加粗**Markdown符号，不依赖AI是否听话 |
+| 2026-07-06 | Phase 7E：morning_monday 增加 TradFi 周初开盘窗口提示（全球外汇+CME Globex股指期货开盘，北京时间夏令时05:00-07:00/冬令时06:00-08:00自动切换，_monday_open_window()按美东dst()判断），提示常见BSL/SSL集中清扫 |
 
 ---
 
