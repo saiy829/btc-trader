@@ -659,6 +659,7 @@ tail -20 /opt/btc-trader/logs/git_sync.log
 | 2026-07-06 | Bug#30（7G发现）：supervisor用绝对路径启动子目录脚本(monitor/signal_engine.py)时sys.path[0]是脚本自身目录而非directory=cwd设置，导致import utils等同级包失败(ModuleNotFoundError)；修复：脚本顶部显式sys.path.insert(0,"/opt/btc-trader") |
 | 2026-07-06 | Bug#31（7H发现）：atas_bars表长期缺少唯一约束，AtasBridge.dll重连/重推同一根K线会被当成新行插入，产生同时间戳多行的隐性重复；修复：加(exchange,market_type,timestamp,timeframe)唯一索引+/atas/bar改INSERT OR REPLACE，历史5857→5760行(97条重复)去重，07-01两行OKX永续×100污染值订正 |
 | 2026-07-06 | Phase 7H 阶段1（侦察）：AtasBridge.dll v2026.07.06-1新增身份侦察模式(ShowIdentityLabel)，图表角标+日志摊开显示InstrumentInfo/TradingManager.Security全部原始身份字段，只加不改，交付后等Sea四张图截图确认真实取值再做阶段2自动解析(7F教训：不凭API文档假设解析规则) |
+| 2026-07-06 | Phase 7H 阶段2（正式）：AtasBridge.dll v2026.07.06-2，基于四图真实截图确认的规则——仅用InstrumentInfo.Exchange精确匹配(Binance/BinanceFutures/OkxSpot/OkxPerpFutures四值，OKX两图TradingManager.Security恒为null不可用)，新增IdentityMode(Auto默认/Manual)，OKX×0.01换算与三个推送方法的exchange/market_type字段统一改用ResolveEffectiveIdentity()最终生效身份，Auto解析失败等同Unset(不猜测)，Auto与手动下拉框冲突时角标变黄但数据仍按Auto值；角标从阶段1原始字段摊开改为运营状态显示(AUTO/MANUAL+推送✓/✗+时间) |
 
 ---
 

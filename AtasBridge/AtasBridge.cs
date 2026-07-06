@@ -18,9 +18,11 @@ using OFT.Rendering.Tools;
 
 namespace AtasBridge
 {
-    // 挂载此指标的图表连的是哪个交易所 / 哪个市场——手动选择，不做自动识别。
-    // 四个图表（币安现货/永续、OKX现货/永续）分别挂载时，各自选一次即可，
-    // 选完后 /atas/bar 和 /atas/trade 推送的 JSON 会自动带上这两个字段，
+    // 挂载此指标的图表连的是哪个交易所 / 哪个市场。Phase 7H Stage2 起默认
+    // Auto 模式：自动从 InstrumentInfo.Exchange 识别（见 IdentityMode/
+    // TryParseAutoIdentity），Manual 模式才需要下面手动选择。
+    // 四个图表（币安现货/永续、OKX现货/永续）分别挂载时，Auto 模式下无需
+    // 手动配置，/atas/bar 和 /atas/trade 推送的 JSON 会自动带上这两个字段，
     // VPS 侧凭这两个字段把四路数据分别存进 atas_bars/atas_large_trades，
     // 不再混算。
     //
@@ -30,11 +32,23 @@ namespace AtasBridge
     // 污染进币安永续的统计里，而且从数据本身完全看不出来是哪个图表漏配置了。
     // 默认改成 Unset 后，漏配置的图表会诚实地报 "unset"，VPS 侧会记警告日志，
     // 一眼就能看出该去哪个图表补设置，不会悄悄污染真实数据。
+    //
+    // Phase 7H Stage2（2026-07-06）：新增 Auto 识别后，同样的"诚实报告"
+    // 原则延续——Auto 解析失败时不猜测，直接等同 Unset 路径（见
+    // ResolveEffectiveIdentity），角标红色显示 UNSET，绝不静默瞎猜。
     public enum ExchangeName { Unset, Binance, Okx }
     public enum MarketKind   { Unset, Spot, Perp }
 
+    // Phase 7H Stage2: Auto（默认）从 InstrumentInfo.Exchange 自动解析
+    // exchange/market_type；Manual 完全等同 7H 之前的版本行为，下拉框
+    // 手动选的值直接生效，不经过任何自动判断。Auto 模式下即使手动下拉框
+    // 也设了值，实际推送数据永远以 Auto 解析结果为准（见
+    // ResolveEffectiveIdentity）——Manual 下拉框此时只用来做冲突提示对比，
+    // 不参与数据本身。
+    public enum IdentityMode { Auto, Manual }
+
     [DisplayName("AtasBridge")]
-    [Description("BTC AI Bridge - Bar+Footprint+LargeTrade+Absorption (v2026.07.06-1, Stage1 Identity Recon)")]
+    [Description("BTC AI Bridge - Bar+Footprint+LargeTrade+Absorption (v2026.07.06-2, Auto Identity Detection)")]
     public class AtasBridge : Indicator
     {
         [Display(Name = "VPS URL", GroupName = "1. Config", Order = 1)]
@@ -52,6 +66,17 @@ namespace AtasBridge
 
         [Display(Name = "Market Type", GroupName = "1. Config", Order = 5)]
         public MarketKind MarketType { get; set; } = MarketKind.Unset;
+
+        // Phase 7H Stage2: Auto (default) parses exchange/market_type from
+        // InstrumentInfo.Exchange automatically (see TryParseAutoIdentity).
+        // Manual ignores auto-detection entirely, behaving exactly like the
+        // pre-7H version (Exchange/MarketType dropdowns above used as-is,
+        // unconditionally). In Auto mode the parsed value always wins for
+        // actual data (push payloads + the OKX x0.01 conversion trigger)
+        // regardless of what the dropdowns say - Manual exists purely as a
+        // fallback channel for instruments Auto cannot recognize.
+        [Display(Name = "Identity Mode", GroupName = "1. Config", Order = 6)]
+        public IdentityMode IdentityModeSetting { get; set; } = IdentityMode.Auto;
 
         [Display(Name = "Enable Bar Push", GroupName = "2. Switch", Order = 1)]
         public bool EnableBarPush { get; set; } = true;
@@ -88,13 +113,13 @@ namespace AtasBridge
         [Display(Name = "Absorb Ratio", GroupName = "4. Absorption", Order = 2)]
         public decimal AbsorbRatio { get; set; } = 3.0m;
 
-        // Phase 7H Stage1: pure reconnaissance, does not affect any push logic
-        // or the manual Exchange/MarketType settings above. Shows whatever raw
-        // identity fields ATAS actually exposes for this chart's instrument, so
-        // Sea can screenshot all four charts and we can design the real
-        // auto-detection parsing rules from observed values (7F lesson: never
-        // guess parsing rules from API docs alone).
-        [Display(Name = "Show Identity Label (Stage1 Recon)", GroupName = "5. Identity Recon (Stage1)", Order = 1)]
+        // Phase 7H Stage1 (recon) -> Stage2 (formal): master on/off switch for
+        // the corner overlay. Stage1 showed a raw field dump so Sea could
+        // screenshot all four charts and confirm real values (7F lesson:
+        // never guess parsing rules from API docs alone); Stage2 replaced the
+        // on-chart content with the operational Auto/Manual status label
+        // (see ComputeIdentityLabel) now that the parsing rule is confirmed.
+        [Display(Name = "Show Identity Label", GroupName = "5. Identity Recon", Order = 1)]
         public bool ShowIdentityLabel { get; set; } = true;
 
         private static readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(10) };
@@ -117,6 +142,14 @@ namespace AtasBridge
         // spam while still catching late-populated fields.
         private int _identityLogCount = 0;
         private const int IDENTITY_LOG_MAX = 3;
+
+        // Phase 7H Stage2: tracks the /atas/bar push outcome, used by the
+        // corner label's status indicator (checkmark/cross + last time).
+        // _lastPushBjTime stays null until the first attempt so the label can
+        // show a neutral "..." instead of a misleading premature checkmark.
+        private bool      _lastPushOk     = false;
+        private DateTime? _lastPushBjTime = null;
+        private int       _pushFailCount  = 0;
 
         // --- large trade dedup ---
         // 2026-07-01 重构：原来用单变量 _lastTrade/_lastLevel 只记"最近一笔"，
@@ -166,9 +199,60 @@ namespace AtasBridge
         // 比其他三路更频繁的原因之一。
         private const decimal OKX_CONTRACT_TO_BTC = 0.01m;
 
-        private decimal VolumeUnitMultiplier =>
-            (Exchange == ExchangeName.Okx && MarketType == MarketKind.Perp)
-                ? OKX_CONTRACT_TO_BTC : 1.0m;
+        private decimal VolumeUnitMultiplier
+        {
+            get
+            {
+                var (exch, mkt, _, _) = ResolveEffectiveIdentity();
+                return (exch == ExchangeName.Okx && mkt == MarketKind.Perp)
+                    ? OKX_CONTRACT_TO_BTC : 1.0m;
+            }
+        }
+
+        // ── Phase 7H Stage2: auto identity detection ─────────────────────────
+        // Parsing rule confirmed from real observed values across all four
+        // charts (Sea's screenshots, 2026-07-06) - not guessed from ATAS API
+        // docs (7F lesson). Only InstrumentInfo.Exchange is used:
+        // TradingManager.Security was null on both OKX charts at recon time,
+        // so a rule relying on Security.Type/ConnectorId would never resolve
+        // for OKX. Exact match only (case-insensitive), no substring/prefix
+        // matching, so a future connector string like "BinanceFuturesCoin"
+        // cannot be silently swallowed into an existing rule.
+        private bool TryParseAutoIdentity(out ExchangeName exch, out MarketKind mkt)
+        {
+            exch = ExchangeName.Unset;
+            mkt  = MarketKind.Unset;
+
+            string? raw = null;
+            try { raw = InstrumentInfo?.Exchange; } catch { }
+            if (string.IsNullOrEmpty(raw)) return false;
+
+            switch (raw.Trim().ToLowerInvariant())
+            {
+                case "binance":        exch = ExchangeName.Binance; mkt = MarketKind.Spot; return true;
+                case "binancefutures": exch = ExchangeName.Binance; mkt = MarketKind.Perp; return true;
+                case "okxspot":        exch = ExchangeName.Okx;     mkt = MarketKind.Spot; return true;
+                case "okxperpfutures": exch = ExchangeName.Okx;     mkt = MarketKind.Perp; return true;
+                default: return false;
+            }
+        }
+
+        // The identity actually used for pushes + the OKX conversion trigger.
+        // Manual mode: just the dropdowns, unchanged from the pre-7H version.
+        // Auto mode: parse failure falls back to Unset (same warning-log path
+        // as the pre-7H "forgot to configure" case) rather than guessing.
+        private (ExchangeName exch, MarketKind mkt, bool autoOk, bool conflict) ResolveEffectiveIdentity()
+        {
+            if (IdentityModeSetting == IdentityMode.Manual)
+                return (Exchange, MarketType, false, false);
+
+            bool ok = TryParseAutoIdentity(out var aExch, out var aMkt);
+            if (!ok)
+                return (ExchangeName.Unset, MarketKind.Unset, false, false);
+
+            bool conflict = aExch != Exchange || aMkt != MarketType;
+            return (aExch, aMkt, true, conflict);
+        }
 
         // ══ Phase 2A + 2B: Bar + Footprint ═══════════════════════════════════
 
@@ -231,6 +315,7 @@ namespace AtasBridge
                 // 时间比真实北京时间整整慢8小时的原因。改用 SpecifyKind 明确声明
                 // 原始值就是 UTC，不经过 .NET 的本地时区猜测，再加8小时得到真正北京时间。
                 var bjTime = DateTime.SpecifyKind(c.LastTime, DateTimeKind.Utc).AddHours(8);
+                var (idExch, idMkt, _, _) = ResolveEffectiveIdentity();
                 var mult   = VolumeUnitMultiplier;
                 double? poc  = c.MaxVolumePriceInfo?.Price        is decimal p1 ? (double)p1 : null;
                 double? mpd  = c.MaxPositiveDeltaPriceInfo?.Price is decimal p2 ? (double)p2 : null;
@@ -277,8 +362,8 @@ namespace AtasBridge
                 {
                     Timestamp        = bjTime.ToString("yyyy-MM-ddTHH:mm:ss+08:00"),
                     Timeframe        = Timeframe,
-                    Exchange         = Exchange.ToString().ToLowerInvariant(),
-                    MarketType       = MarketType.ToString().ToLowerInvariant(),
+                    Exchange         = idExch.ToString().ToLowerInvariant(),
+                    MarketType       = idMkt.ToString().ToLowerInvariant(),
                     Open             = (double)c.Open,
                     High             = (double)c.High,
                     Low              = (double)c.Low,
@@ -302,8 +387,17 @@ namespace AtasBridge
                     Source           = "AtasBridge/5.1"
                 };
                 await SendAsync("/atas/bar", payload);
+
+                // Phase 7H Stage2: feeds the corner label's status indicator.
+                _lastPushOk     = true;
+                _pushFailCount  = 0;
+                _lastPushBjTime = DateTime.UtcNow.AddHours(8);
             }
-            catch { }
+            catch
+            {
+                _lastPushOk = false;
+                _pushFailCount++;
+            }
         }
 
         private FpLevel ToFpLevel(PriceVolumeInfo l, string tag, decimal mult) => new FpLevel
@@ -366,11 +460,12 @@ namespace AtasBridge
             try
             {
                 var bjTime = DateTime.UtcNow.AddHours(8);
+                var (idExch, idMkt, _, _) = ResolveEffectiveIdentity();
                 var payload = new AbsorptionPayload
                 {
                     Timestamp   = bjTime.ToString("yyyy-MM-ddTHH:mm:ss+08:00"),
-                    Exchange    = Exchange.ToString().ToLowerInvariant(),
-                    MarketType  = MarketType.ToString().ToLowerInvariant(),
+                    Exchange    = idExch.ToString().ToLowerInvariant(),
+                    MarketType  = idMkt.ToString().ToLowerInvariant(),
                     Side        = side,
                     Price       = (double)price,
                     AbsorbedBtc = (double)absorbedBtc,
@@ -415,68 +510,62 @@ namespace AtasBridge
         // Labels/DrawingText (bar+price anchored, scrolls off-screen with the
         // chart), this stays pinned to the corner regardless of scroll/zoom.
         private static readonly RenderFont _identityRenderFont = new RenderFont("Arial", 13f);
-        private bool _onRenderLogged = false;
 
         protected override void OnRender(RenderContext context, DrawingLayouts layout)
         {
             base.OnRender(context, layout);
 
             if (!ShowIdentityLabel) return;
-
-            // One-time diagnostic: confirm OnRender is actually being invoked
-            // by ATAS at all, and what layout flag value(s) it passes - two
-            // earlier Stage1 builds had the label silently never appear
-            // (EnableCustomDrawing was missing, then a DrawingLayouts.Final
-            // exact-equality check that may never have matched), so this
-            // removes the guesswork for next time if it still doesn't show.
-            if (!_onRenderLogged)
-            {
-                _onRenderLogged = true;
-                try { LoggerHelper.LogInfo(this, "{0}", new object[] { $"AtasBridge OnRender fired, layout={layout} ({(int)layout})" }); } catch { }
-            }
-            // Phase 7H Stage1 troubleshooting: deliberately NOT filtering by
-            // DrawingLayouts here. DrawingLayouts is a [Flags] enum (None=1,
-            // Historical=2, LatestBar=4, Final=8) and after two failed
-            // attempts to guess which layout value(s) ATAS actually passes
-            // for this indicator, drawing unconditionally on every OnRender
-            // call is the reliable option - it is a single line of text, so
-            // even if this fires multiple times per frame the redraws just
-            // overlap at the same pixel position with no visible difference.
+            // Confirmed via a Stage1 diagnostic log that ATAS calls this with
+            // layout=LatestBar(4) for this indicator, not Final(8) - drawing
+            // unconditionally on every call remains the reliable choice since
+            // it is a single line of text (harmless if it ever fires more
+            // than once per frame; redraws just overlap at the same pixel).
 
             try
             {
-                string text = BuildIdentityShort();
+                var (text, color) = ComputeIdentityLabel();
                 var size = context.MeasureString(text, _identityRenderFont);
                 const int x = 8, y = 8, pad = 4;
 
                 context.FillRectangle(
                     Color.FromArgb(190, 0, 0, 0),
                     new Rectangle(x - pad, y - pad, size.Width + pad * 2, size.Height + pad * 2));
-                context.DrawString(text, _identityRenderFont, Color.Yellow, x, y);
+                context.DrawString(text, _identityRenderFont, color, x, y);
             }
             catch { }
         }
 
-        // Compact single-line summary for the on-chart corner label.
-        private string BuildIdentityShort()
+        // Phase 7H Stage2: operational status label (replaces Stage1's raw
+        // field dump now that the parsing rule is confirmed from real data).
+        // Four states:
+        //   - Auto mode, parse failed        -> red "UNSET" (no guessing)
+        //   - Auto mode, parsed but conflicts
+        //     with the manual dropdowns       -> yellow, shows both values
+        //   - Auto mode, parsed and resolved  -> green/orange-red by push status
+        //   - Manual mode                     -> same status style, tagged MANUAL
+        private (string text, Color color) ComputeIdentityLabel()
         {
-            string instrument = "?", exchange = "?", secType = "?", connId = "?", inverse = "?";
+            string statusSym = !_lastPushBjTime.HasValue
+                ? "..."
+                : (_lastPushOk ? "✓" : $"✗ x{_pushFailCount}");
+            string timeStr = _lastPushBjTime.HasValue
+                ? _lastPushBjTime.Value.ToString("HH:mm:ss")
+                : "--:--:--";
+            Color okColor = _lastPushOk ? Color.LightGreen : Color.OrangeRed;
 
-            try { instrument = InstrumentInfo?.Instrument ?? Instrument ?? "?"; } catch { }
-            try { exchange   = InstrumentInfo?.Exchange ?? "?"; } catch { }
-            try
-            {
-                var sec = TradingManager?.Security;
-                if (sec != null)
-                {
-                    secType = sec.Type.ToString();
-                    connId  = sec.ConnectorId ?? "?";
-                    inverse = sec.IsInverseFutures.ToString();
-                }
-            }
-            catch { }
+            if (IdentityModeSetting == IdentityMode.Manual)
+                return ($"{Exchange}|{MarketType} MANUAL {statusSym} {timeStr}", okColor);
 
-            return $"RAW: {instrument} | {exchange} | type={secType} | conn={connId} | inverse={inverse}";
+            bool ok = TryParseAutoIdentity(out var aExch, out var aMkt);
+            if (!ok)
+                return ("UNSET (raw identity not recognized)", Color.Red);
+
+            bool conflict = aExch != Exchange || aMkt != MarketType;
+            if (conflict)
+                return ($"AUTO {aExch}|{aMkt} ≠ 手动 {Exchange}|{MarketType}", Color.Yellow);
+
+            return ($"{aExch}|{aMkt} AUTO {statusSym} {timeStr}", okColor);
         }
 
         // Full multi-line dump for the ATAS log - every identity-related field
@@ -591,6 +680,7 @@ namespace AtasBridge
                                  ? "buy" : "sell";
                 var tradePrice = trade.FirstPrice;
                 var volUsd     = (double)(volumeBtc * tradePrice);
+                var (idExch, idMkt, _, _) = ResolveEffectiveIdentity();
 
                 double? distPct = null;
                 if (_pocPrice.HasValue && _pocPrice.Value > 0)
@@ -600,8 +690,8 @@ namespace AtasBridge
                 var payload = new TradePayload
                 {
                     Timestamp        = bjTime.ToString("yyyy-MM-ddTHH:mm:ss.fff+08:00"),
-                    Exchange         = Exchange.ToString().ToLowerInvariant(),
-                    MarketType       = MarketType.ToString().ToLowerInvariant(),
+                    Exchange         = idExch.ToString().ToLowerInvariant(),
+                    MarketType       = idMkt.ToString().ToLowerInvariant(),
                     Price            = (double)tradePrice,
                     Volume           = (double)volumeBtc,
                     VolumeUsd        = volUsd,

@@ -99,3 +99,52 @@
 - 构建前已备份阶段1之前的运行中 DLL 至
   `C:\AtasBridge_backups\AtasBridge_backup_5.1.dll`（7F 时忘记先备份、
   被 `.csproj` 的编译后自动复制目标覆盖过一次运行中DLL，这次改正）
+
+## v2026.07.06-2（2026-07-06，Phase 7H 阶段2，正式构建）
+
+Sea 部署阶段1 DLL 后，四个图表（币安现货/永续、OKX现货/永续）各截了一张
+角标图，真实观察值：
+
+| 图表 | `InstrumentInfo.Exchange` | `Security.Type` | `ConnectorId` | `IsInverseFutures` |
+|---|---|---|---|---|
+| 币安永续 | `BinanceFutures` | CryptoFutures | BTCUSDT | False |
+| 币安现货 | `Binance` | Bitcoin | BTCUSDT | False |
+| OKX永续 | `OkxPerpFutures` | `null`（取不到） | `null` | `null` |
+| OKX现货 | `OkxSpot` | `null`（取不到） | `null` | `null` |
+
+**关键发现**：`TradingManager.Security` 在 OKX 两个图表上是 `null`
+（可能是连接建立时序或 OKX 连接器实现差异导致），如果解析规则依赖
+`Security.Type`/`ConnectorId`，OKX 两路会永远识别失败。改为只依据
+`InstrumentInfo.Exchange` 这一个字符串字段——四个真实值互不相同，足以
+唯一区分四种组合，且在全部四个图表上都能稳定取到值。
+
+- **新增 `IdentityMode` 设置**（`Auto`默认 / `Manual`），`TryParseAutoIdentity()`
+  只做精确匹配（忽略大小写，不接受子串/前缀），规则：
+  ```
+  "Binance"        -> Exchange=Binance, MarketType=Spot
+  "BinanceFutures" -> Exchange=Binance, MarketType=Perp
+  "OkxSpot"        -> Exchange=Okx,     MarketType=Spot
+  "OkxPerpFutures" -> Exchange=Okx,     MarketType=Perp
+  其他任何字符串    -> 不判定，等同 Unset 路径（角标红色 UNSET + 不猜测）
+  ```
+- 新增 `ResolveEffectiveIdentity()`：Auto 模式下解析成功即为最终生效身份，
+  解析失败则为 Unset；Manual 模式下就是下拉框原值（与7H之前版本完全一致）。
+  `VolumeUnitMultiplier`（OKX ×0.01换算触发）与三个推送方法
+  （`PostBarAsync`/`PostTradeAsync`/`PostAbsorptionAsync`）的
+  `exchange`/`market_type` 字段全部改用这个最终生效身份，不再直接读
+  手动下拉框——这样自动识别和OKX换算真正联动，而不是各算各的
+- 角标（`OnRender`）从阶段1的原始字段摊开显示，改成运营状态指示：
+  - Auto 且解析成功：`{Exchange}|{MarketType} AUTO ✓ 12:55:01`（绿色）
+  - Auto 且解析失败：`UNSET (raw identity not recognized)`（红色）
+  - Auto 解析结果与手动下拉框冲突：`AUTO Okx|Perp ≠ 手动 Binance|Perp`
+    （黄色，数据仍按 Auto 值推送/换算，角标只是提示不一致）
+  - Manual 模式：`{Exchange}|{MarketType} MANUAL ✓ 12:55:01`（同样风格，
+    行为等同7H之前版本，纯下拉框驱动）
+  - `✓`/`✗ x{失败次数}` 反映 `/atas/bar` 最近一次推送成功/失败；首次推送
+    完成前显示 `...`，不提前显示误导性的对错状态
+- 阶段1的原始字段摊开显示（`BuildIdentityDump`/`this.LogInfo`，每实例
+  最多3条）继续保留，作为独立于角标的诊断轨迹，不受本次改动影响
+- 版本号：`v2026.07.06-2`（同日第二次构建）
+- 本次未改动：`AtasBridge/5.1` 这个 Source 版本字符串（写在每条推送
+  payload里，仅作诊断标识，任务卡未要求同步这个字段，维持现状避免
+  范围蔓延）
