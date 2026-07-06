@@ -10,7 +10,10 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.Tasks;
+using System.Drawing;
 using ATAS.Indicators;
+using ATAS.Indicators.Drawing;
+using Utils.Common.Logging;
 
 namespace AtasBridge
 {
@@ -30,7 +33,7 @@ namespace AtasBridge
     public enum MarketKind   { Unset, Spot, Perp }
 
     [DisplayName("AtasBridge")]
-    [Description("BTC AI Bridge - Bar+Footprint+LargeTrade+Absorption (v5.1, multi-market)")]
+    [Description("BTC AI Bridge - Bar+Footprint+LargeTrade+Absorption (v2026.07.06-1, Stage1 Identity Recon)")]
     public class AtasBridge : Indicator
     {
         [Display(Name = "VPS URL", GroupName = "1. Config", Order = 1)]
@@ -84,6 +87,15 @@ namespace AtasBridge
         [Display(Name = "Absorb Ratio", GroupName = "4. Absorption", Order = 2)]
         public decimal AbsorbRatio { get; set; } = 3.0m;
 
+        // Phase 7H Stage1: pure reconnaissance, does not affect any push logic
+        // or the manual Exchange/MarketType settings above. Shows whatever raw
+        // identity fields ATAS actually exposes for this chart's instrument, so
+        // Sea can screenshot all four charts and we can design the real
+        // auto-detection parsing rules from observed values (7F lesson: never
+        // guess parsing rules from API docs alone).
+        [Display(Name = "Show Identity Label (Stage1 Recon)", GroupName = "5. Identity Recon (Stage1)", Order = 1)]
+        public bool ShowIdentityLabel { get; set; } = true;
+
         private static readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(10) };
 
         private decimal  _cvd     = 0m;
@@ -97,6 +109,13 @@ namespace AtasBridge
         // on every tick of the still-forming current bar, not once per close.
         private int _absorbBar = -1;
         private readonly HashSet<(decimal price, string side)> _absorbSeen = new();
+
+        // Phase 7H Stage1: identity recon state. Logged a few times (not just
+        // once) because TradingManager.Security can still be null on the very
+        // first bar before ATAS finishes connecting - capping at 3 avoids log
+        // spam while still catching late-populated fields.
+        private int _identityLogCount = 0;
+        private const int IDENTITY_LOG_MAX = 3;
 
         // --- large trade dedup ---
         // 2026-07-01 重构：原来用单变量 _lastTrade/_lastLevel 只记"最近一笔"，
@@ -147,6 +166,10 @@ namespace AtasBridge
 
         protected override void OnCalculate(int bar, decimal value)
         {
+            // Phase 7H Stage1: pure reconnaissance, runs first and touches
+            // nothing below. Only adds a corner label + log lines.
+            if (ShowIdentityLabel) UpdateIdentityRecon(bar);
+
             // Phase 7F: must run before the "bar <= _lastBar" early return below,
             // because absorption needs to be checked on every tick of the
             // still-forming current bar, not just once when a bar closes.
@@ -353,6 +376,120 @@ namespace AtasBridge
                 await SendAsync("/atas/absorption", payload);
             }
             catch { }
+        }
+
+        // ══ Phase 7H Stage1: identity reconnaissance ═══════════════════════════
+        // Read-only. Does not touch Exchange/MarketType settings or any push
+        // payload. Purpose: dump every identity-related field ATAS actually
+        // exposes for this chart's instrument (Indicator.Instrument,
+        // InstrumentInfo, TradingManager.Security) to the chart corner and the
+        // ATAS log, so Sea can screenshot all four charts and we can design
+        // the real Stage2 auto-detection rules from what is actually observed
+        // - not from guessing based on the SDK's property names (7F lesson).
+
+        private void UpdateIdentityRecon(int bar)
+        {
+            try
+            {
+                int labelBar = (FirstVisibleBarNumber >= 0 && FirstVisibleBarNumber <= CurrentBar)
+                    ? FirstVisibleBarNumber : bar;
+                var candle = GetCandle(labelBar);
+                if (candle is null) return;
+
+                Labels["AtasBridgeIdentityRecon"] = new DrawingText(TickSize)
+                {
+                    Text         = BuildIdentityShort(),
+                    Bar          = labelBar,
+                    TextPrice    = candle.High,
+                    IsAbovePrice = true,
+                    YOffset      = 20,
+                    Textcolor    = Color.Yellow,
+                    FillColor    = Color.FromArgb(190, 0, 0, 0),
+                    Outlinecolor = Color.Yellow,
+                    FontSize     = 13f,
+                    AutoSize     = true,
+                    Tag          = "AtasBridgeIdentityRecon"
+                };
+            }
+            catch { }
+
+            if (_identityLogCount < IDENTITY_LOG_MAX)
+            {
+                _identityLogCount++;
+                try { LoggerHelper.LogInfo(this, "{0}", new object[] { BuildIdentityDump() }); } catch { }
+            }
+        }
+
+        // Compact single-line summary for the on-chart corner label.
+        private string BuildIdentityShort()
+        {
+            string instrument = "?", exchange = "?", secType = "?", connId = "?", inverse = "?";
+
+            try { instrument = InstrumentInfo?.Instrument ?? Instrument ?? "?"; } catch { }
+            try { exchange   = InstrumentInfo?.Exchange ?? "?"; } catch { }
+            try
+            {
+                var sec = TradingManager?.Security;
+                if (sec != null)
+                {
+                    secType = sec.Type.ToString();
+                    connId  = sec.ConnectorId ?? "?";
+                    inverse = sec.IsInverseFutures.ToString();
+                }
+            }
+            catch { }
+
+            return $"RAW: {instrument} | {exchange} | type={secType} | conn={connId} | inverse={inverse}";
+        }
+
+        // Full multi-line dump for the ATAS log - every identity-related field
+        // reachable from the Indicator base class and TradingManager.Security.
+        private string BuildIdentityDump()
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("=== AtasBridge Phase7H Stage1 Identity Recon ===");
+
+            try { sb.AppendLine($"Indicator.Instrument = {Instrument}"); }
+            catch (Exception ex) { sb.AppendLine($"Indicator.Instrument = <error: {ex.Message}>"); }
+
+            try
+            {
+                var ii = InstrumentInfo;
+                if (ii != null)
+                {
+                    sb.AppendLine($"InstrumentInfo.Instrument = {ii.Instrument}");
+                    sb.AppendLine($"InstrumentInfo.Exchange   = {ii.Exchange}");
+                    sb.AppendLine($"InstrumentInfo.TickSize   = {ii.TickSize}");
+                    sb.AppendLine($"InstrumentInfo.TimeZone   = {ii.TimeZone}");
+                }
+                else sb.AppendLine("InstrumentInfo = null");
+            }
+            catch (Exception ex) { sb.AppendLine($"InstrumentInfo access error: {ex.Message}"); }
+
+            try
+            {
+                var sec = TradingManager?.Security;
+                if (sec != null)
+                {
+                    sb.AppendLine($"Security.Instrument      = {sec.Instrument}");
+                    sb.AppendLine($"Security.Exchange        = {sec.Exchange}");
+                    sb.AppendLine($"Security.Code             = {sec.Code}");
+                    sb.AppendLine($"Security.ConnectorId      = {sec.ConnectorId}");
+                    sb.AppendLine($"Security.Type (SecType)   = {sec.Type}");
+                    sb.AppendLine($"Security.IsInverseFutures = {sec.IsInverseFutures}");
+                    sb.AppendLine($"Security.BaseCurrency     = {sec.BaseCurrency}");
+                    sb.AppendLine($"Security.QuoteCurrency    = {sec.QuoteCurrency}");
+                    sb.AppendLine($"Security.FundingRate      = {sec.FundingRate}");
+                    sb.AppendLine($"Security.NextFundingTime  = {sec.NextFundingTime}");
+                    sb.AppendLine($"Security.Expiration       = {sec.Expiration}");
+                    sb.AppendLine($"Security.Id / SecurityId  = {sec.Id} / {sec.SecurityId}");
+                }
+                else sb.AppendLine("TradingManager.Security = null (not yet available)");
+            }
+            catch (Exception ex) { sb.AppendLine($"TradingManager.Security access error: {ex.Message}"); }
+
+            sb.AppendLine("Current manual settings: Exchange=" + Exchange + " MarketType=" + MarketType);
+            return sb.ToString();
         }
 
         // ══ Phase 3: Large trade + update tracking ════════════════════════════

@@ -1475,8 +1475,11 @@ async def atas_bar(request: Request):
 
     try:
         conn = sqlite3.connect(_ATAS_DB, timeout=5)
+        # Phase 7H: INSERT OR REPLACE 配合 idx_atas_bars_identity 唯一索引
+        # (exchange, market_type, timestamp, timeframe)，DLL 无论重推多少次
+        # 同一根K线，库里永远只保留最新一行，不再依赖手工去重
         conn.execute("""
-            INSERT INTO atas_bars
+            INSERT OR REPLACE INTO atas_bars
             (timestamp, timeframe, exchange, market_type,
              open, high, low, close, volume,
              ask_vol, bid_vol, delta, cumulative_delta,

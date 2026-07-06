@@ -12,6 +12,14 @@
       <HintPath>D:\Program Files\ATAS X\ATAS.Indicators.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="ATAS.DataFeedsCore">
+      <HintPath>D:\Program Files\ATAS X\ATAS.DataFeedsCore.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Utils.Common">
+      <HintPath>D:\Program Files\ATAS X\Utils.Common.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
   <!-- 编译后自动复制 DLL 到 ATAS X 指标目录 -->
