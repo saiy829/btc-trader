@@ -11,7 +11,10 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using ATAS.Indicators;
+using ATAS.Indicators.Drawing;
+using Utils.Common;
 using Utils.Common.Logging;
 using OFT.Rendering.Context;
 using OFT.Rendering.Tools;
@@ -47,10 +50,32 @@ namespace AtasBridge
     // 不参与数据本身。
     public enum IdentityMode { Auto, Manual }
 
+    // Phase 7I: corner label anchor. Default moved to BottomLeft per this
+    // card's request (avoids overlapping ATAS's own top-left indicator name
+    // list, which is where the Stage1/Stage2 corner label used to sit).
+    public enum LabelPosition { BottomLeft, TopLeft, BottomRight, TopRight }
+
+    // Phase 7I hotfix: single source of truth for the version tag, referenced
+    // both by the class [Description] attribute below and by the corner
+    // label / read-only Version setting, so they cannot drift out of sync.
+    internal static class AtasBridgeVersion
+    {
+        public const string Tag  = "v2026.07.06-5";
+        public const string Desc = "Engine Signal Display + Compact Corner Label";
+    }
+
     [DisplayName("AtasBridge")]
-    [Description("BTC AI Bridge - Bar+Footprint+LargeTrade+Absorption (v2026.07.06-2, Auto Identity Detection)")]
+    [Description("BTC AI Bridge - Bar+Footprint+LargeTrade+Absorption (" + AtasBridgeVersion.Tag + ", " + AtasBridgeVersion.Desc + ")")]
     public class AtasBridge : Indicator
     {
+        // Phase 7I hotfix: read-only version display, requested so the build
+        // in use is visible from the indicator's own settings without
+        // needing to check the "About" tab or file properties externally.
+        // Not wired into any logic - purely informational.
+        [Display(Name = "Version", GroupName = "1. Config", Order = 0)]
+        [System.ComponentModel.ReadOnly(true)]
+        public string VersionInfo { get; set; } = AtasBridgeVersion.Tag + " (" + AtasBridgeVersion.Desc + ")";
+
         [Display(Name = "VPS URL", GroupName = "1. Config", Order = 1)]
         public string VpsUrl { get; set; } = "https://mb.661688.xyz";
 
@@ -122,6 +147,35 @@ namespace AtasBridge
         [Display(Name = "Show Identity Label", GroupName = "5. Identity Recon", Order = 1)]
         public bool ShowIdentityLabel { get; set; } = true;
 
+        // Phase 7I: label position is now configurable, default BottomLeft
+        // (previously hardcoded top-left at pixel 8,8).
+        [Display(Name = "Label Position", GroupName = "5. Identity Recon", Order = 2)]
+        public LabelPosition LabelPositionSetting { get; set; } = LabelPosition.BottomLeft;
+
+        // Phase 7I hotfix: Sea reported BottomLeft rendered almost entirely
+        // off-screen (the chart's own bottom axis/scrollbar chrome eats into
+        // RenderContext.Size.Height without being part of the visible candle
+        // area, and an 8px margin was not enough clearance). Rather than
+        // guess a "correct" margin for every theme/DPI, expose manual pixel
+        // offsets so Sea can nudge the label to a visible spot themselves.
+        [Display(Name = "Label Offset X", GroupName = "5. Identity Recon", Order = 3)]
+        public int LabelOffsetX { get; set; } = 0;
+
+        [Display(Name = "Label Offset Y", GroupName = "5. Identity Recon", Order = 4)]
+        public int LabelOffsetY { get; set; } = 0;
+
+        // Phase 7I: polls the VPS's existing GET /api/signal/latest (7G
+        // pre-wired this read-only endpoint; zero server-side changes here)
+        // and draws the current open engine_signals row (entry/stop/t1/t2)
+        // as price lines. Only runs on the Binance|Perp chart - the engine's
+        // score is computed on Binance perpetual data, so drawing it on the
+        // other three charts would be misleading.
+        [Display(Name = "Show Engine Signals", GroupName = "6. Engine Signals", Order = 1)]
+        public bool ShowEngineSignals { get; set; } = true;
+
+        [Display(Name = "Signal Poll Seconds", GroupName = "6. Engine Signals", Order = 2)]
+        public int SignalPollSeconds { get; set; } = 10;
+
         private static readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(10) };
 
         private decimal  _cvd     = 0m;
@@ -151,6 +205,42 @@ namespace AtasBridge
         private DateTime? _lastPushBjTime = null;
         private int       _pushFailCount  = 0;
 
+        // Phase 7I: engine signal polling state. Polling only proceeds on the
+        // Binance|Perp chart (checked against the effective identity, so this
+        // also respects Auto/Manual mode). _signalChartUnsupportedLogged logs
+        // the "not this chart" explanation exactly once, not every tick.
+        private DateTime  _lastSignalPollUtc          = DateTime.MinValue;
+        private bool      _signalPollInFlight          = false;
+        private bool      _signalPollOk                = false;
+        private DateTime? _lastSignalPollBjTime        = null;
+        private int       _signalPollFailCount         = 0;
+        private bool      _signalChartUnsupportedLogged = false;
+
+        private const int SIGNAL_TERMINAL_GRACE_MINUTES = 30;
+
+        private sealed class ActiveSignal
+        {
+            public int      Id;
+            public string   Direction = "";
+            public double   Score;
+            public decimal  Entry, Stop, T1, T2;
+            public string   Status = "open";
+            public bool     IsTerminal;
+            public DateTime? TerminalSinceUtc;
+        }
+        private ActiveSignal? _activeSignal = null;
+
+        // Chart drawing objects for the four signal price lines + their
+        // right-edge text labels. Kept as fields so DrawSignalLines can
+        // mutate them in place (move to the current bar, recolor to gray on
+        // terminal) instead of removing/re-adding every tick, and so
+        // OnDispose can clean them up when the indicator is unloaded.
+        private LineTillTouch? _sigLineEntry, _sigLineStop, _sigLineT1, _sigLineT2;
+        private const string SIG_TAG_ENTRY = "AtasBridgeSigEntry";
+        private const string SIG_TAG_STOP  = "AtasBridgeSigStop";
+        private const string SIG_TAG_T1    = "AtasBridgeSigT1";
+        private const string SIG_TAG_T2    = "AtasBridgeSigT2";
+
         // --- large trade dedup ---
         // 2026-07-01 重构：原来用单变量 _lastTrade/_lastLevel 只记"最近一笔"，
         // 如果两笔不同方向/不同价位的单子几乎同时在累积（买方在A价位堆量的
@@ -179,6 +269,15 @@ namespace AtasBridge
         // behind Sea's "no label visible after redeploy" report, not the
         // OnRender/DrawingLayouts logic itself.
         public AtasBridge() : base(true) { DenyToChangePanel = true; EnableCustomDrawing = true; }
+
+        // Phase 7I: remove any signal drawing objects (price lines + labels)
+        // this instance added, so unloading/replacing the indicator does not
+        // leave stale lines behind on the chart.
+        protected override void OnDispose()
+        {
+            ClearSignalDrawing();
+            base.OnDispose();
+        }
 
         // ── OKX 永续合约"张→BTC"换算 ─────────────────────────────────────
         // OKX 永续合约(SWAP)成交量单位是"张"(contract)，1张=0.01 BTC（OKX官方
@@ -261,6 +360,13 @@ namespace AtasBridge
             // Phase 7H Stage1: pure reconnaissance, runs first and touches
             // nothing below. Only adds a corner label + log lines.
             if (ShowIdentityLabel) UpdateIdentityRecon(bar);
+
+            // Phase 7I: signal polling gate + grace-timer check + per-tick
+            // redraw (keeps the price line labels tracking the current bar).
+            // Runs every tick like the other Stage1/Stage2 additions above -
+            // cheap (mostly a time comparison), only fires an actual HTTP
+            // poll once every SignalPollSeconds.
+            if (ShowEngineSignals) UpdateEngineSignals();
 
             // Phase 7F: must run before the "bar <= _lastBar" early return below,
             // because absorption needs to be checked on every tick of the
@@ -514,58 +620,153 @@ namespace AtasBridge
         protected override void OnRender(RenderContext context, DrawingLayouts layout)
         {
             base.OnRender(context, layout);
-
-            if (!ShowIdentityLabel) return;
             // Confirmed via a Stage1 diagnostic log that ATAS calls this with
             // layout=LatestBar(4) for this indicator, not Final(8) - drawing
             // unconditionally on every call remains the reliable choice since
-            // it is a single line of text (harmless if it ever fires more
+            // these are single lines of text (harmless if it ever fires more
             // than once per frame; redraws just overlap at the same pixel).
 
-            try
+            if (ShowIdentityLabel)
             {
-                var (text, color) = ComputeIdentityLabel();
-                var size = context.MeasureString(text, _identityRenderFont);
-                const int x = 8, y = 8, pad = 4;
+                try
+                {
+                    var (text, color) = ComputeIdentityLabel();
+                    var size = context.MeasureString(text, _identityRenderFont);
+                    var (x, y) = ResolveCornerPosition(context, size);
 
-                context.FillRectangle(
-                    Color.FromArgb(190, 0, 0, 0),
-                    new Rectangle(x - pad, y - pad, size.Width + pad * 2, size.Height + pad * 2));
-                context.DrawString(text, _identityRenderFont, color, x, y);
+                    context.FillRectangle(
+                        Color.FromArgb(190, 0, 0, 0),
+                        new Rectangle(x - 4, y - 4, size.Width + 8, size.Height + 8));
+                    context.DrawString(text, _identityRenderFont, color, x, y);
+                }
+                catch { }
             }
-            catch { }
+
+            if (ShowEngineSignals) RenderEngineHeader(context);
         }
 
-        // Phase 7H Stage2: operational status label (replaces Stage1's raw
-        // field dump now that the parsing rule is confirmed from real data).
-        // Four states:
+        // Phase 7I: corner label pixel position from the configurable
+        // LabelPosition setting (previously hardcoded to (8,8) top-left).
+        // Phase 7I hotfix: bottom-anchored positions get extra clearance
+        // (bottomMargin) from the chart's own bottom axis/scrollbar chrome,
+        // which Sea found ate into RenderContext.Size.Height enough that an
+        // 8px margin rendered the label almost entirely off-screen.
+        // LabelOffsetX/Y are applied on top of whatever this resolves to, so
+        // Sea can nudge further for their specific theme/DPI.
+        private (int x, int y) ResolveCornerPosition(RenderContext context, Size size)
+        {
+            const int margin = 8;
+            const int bottomMargin = 40;
+
+            int x, y;
+            switch (LabelPositionSetting)
+            {
+                case LabelPosition.TopRight:
+                    x = context.Size.Width - margin - size.Width; y = margin;
+                    break;
+                case LabelPosition.BottomRight:
+                    x = context.Size.Width - margin - size.Width;
+                    y = context.Size.Height - bottomMargin - size.Height;
+                    break;
+                case LabelPosition.BottomLeft:
+                    x = margin;
+                    y = context.Size.Height - bottomMargin - size.Height;
+                    break;
+                case LabelPosition.TopLeft:
+                default:
+                    x = margin; y = margin;
+                    break;
+            }
+            return (x + LabelOffsetX, y + LabelOffsetY);
+        }
+
+        // Phase 7H Stage2 -> Phase 7I: operational status label. All status
+        // characters are plain ASCII (Phase 7I fix: the earlier check/cross/
+        // not-equal Unicode glyphs rendered as "[]" boxes on Sea's ATAS
+        // build's font - see CHANGELOG for the report). Four states:
         //   - Auto mode, parse failed        -> red "UNSET" (no guessing)
         //   - Auto mode, parsed but conflicts
         //     with the manual dropdowns       -> yellow, shows both values
         //   - Auto mode, parsed and resolved  -> green/orange-red by push status
         //   - Manual mode                     -> same status style, tagged MANUAL
+        // On the Binance|Perp chart only, a " | SIG <status>" segment is
+        // appended reflecting the engine signal poll outcome (Phase 7I).
+        // Phase 7I hotfix: dropped the HH:mm:ss timestamps and the version
+        // tag from this on-chart text per Sea's feedback ("too long" -
+        // the version is still visible in the read-only Version setting).
         private (string text, Color color) ComputeIdentityLabel()
         {
             string statusSym = !_lastPushBjTime.HasValue
                 ? "..."
-                : (_lastPushOk ? "✓" : $"✗ x{_pushFailCount}");
-            string timeStr = _lastPushBjTime.HasValue
-                ? _lastPushBjTime.Value.ToString("HH:mm:ss")
-                : "--:--:--";
+                : (_lastPushOk ? "OK" : $"ERR({_pushFailCount})");
             Color okColor = _lastPushOk ? Color.LightGreen : Color.OrangeRed;
 
+            string text;
+            Color color;
+
             if (IdentityModeSetting == IdentityMode.Manual)
-                return ($"{Exchange}|{MarketType} MANUAL {statusSym} {timeStr}", okColor);
+            {
+                text  = $"{Exchange}|{MarketType} MANUAL {statusSym}";
+                color = okColor;
+            }
+            else
+            {
+                bool ok = TryParseAutoIdentity(out var aExch, out var aMkt);
+                if (!ok)
+                    return ("UNSET (unrecognized)", Color.Red);
 
-            bool ok = TryParseAutoIdentity(out var aExch, out var aMkt);
-            if (!ok)
-                return ("UNSET (raw identity not recognized)", Color.Red);
+                bool conflict = aExch != Exchange || aMkt != MarketType;
+                if (conflict)
+                {
+                    text  = $"AUTO {aExch}|{aMkt} != MANUAL {Exchange}|{MarketType}";
+                    color = Color.Yellow;
+                }
+                else
+                {
+                    text  = $"{aExch}|{aMkt} AUTO {statusSym}";
+                    color = okColor;
+                }
+            }
 
-            bool conflict = aExch != Exchange || aMkt != MarketType;
-            if (conflict)
-                return ($"AUTO {aExch}|{aMkt} ≠ 手动 {Exchange}|{MarketType}", Color.Yellow);
+            if (ShowEngineSignals)
+            {
+                var (exch, mkt, _, _) = ResolveEffectiveIdentity();
+                if (exch == ExchangeName.Binance && mkt == MarketKind.Perp)
+                {
+                    string sigSym = !_lastSignalPollBjTime.HasValue
+                        ? "..."
+                        : (_signalPollOk ? "OK" : $"ERR({_signalPollFailCount})");
+                    text += $" | SIG {sigSym}";
+                }
+            }
 
-            return ($"{aExch}|{aMkt} AUTO {statusSym} {timeStr}", okColor);
+            return (text, color);
+        }
+
+        // Phase 7I: top-of-chart line summarizing the currently displayed
+        // engine signal (if any). Screen-anchored like the corner label, but
+        // always at the top regardless of LabelPositionSetting so it never
+        // depends on / collides with the corner label's chosen corner.
+        private void RenderEngineHeader(RenderContext context)
+        {
+            if (_activeSignal is null) return;
+
+            try
+            {
+                string scoreStr = (_activeSignal.Score >= 0 ? "+" : "") + _activeSignal.Score.ToString("0");
+                string suffix = _activeSignal.IsTerminal ? $" [{_activeSignal.Status.ToUpperInvariant()}]" : " (SIM)";
+                string text = $"ENGINE #{_activeSignal.Id} {_activeSignal.Direction} score{scoreStr}{suffix}";
+                var size = context.MeasureString(text, _identityRenderFont);
+                int x = Math.Max(8, (context.Size.Width - size.Width) / 2);
+                const int y = 8;
+                Color color = _activeSignal.IsTerminal ? Color.Gray : Color.White;
+
+                context.FillRectangle(
+                    Color.FromArgb(190, 0, 0, 0),
+                    new Rectangle(x - 4, y - 4, size.Width + 8, size.Height + 8));
+                context.DrawString(text, _identityRenderFont, color, x, y);
+            }
+            catch { }
         }
 
         // Full multi-line dump for the ATAS log - every identity-related field
@@ -616,6 +817,242 @@ namespace AtasBridge
 
             sb.AppendLine("Current manual settings: Exchange=" + Exchange + " MarketType=" + MarketType);
             return sb.ToString();
+        }
+
+        // ══ Phase 7I: engine signal polling + on-chart display ════════════════
+        // Polls the VPS's existing read-only GET /api/signal/latest (7G
+        // pre-wired this endpoint - zero server-side changes for this card).
+        // Only runs on the Binance|Perp chart (checked against the effective
+        // identity, respecting Auto/Manual mode) since the engine's score is
+        // computed from Binance perpetual data; drawing it on the other
+        // three charts would misleadingly suggest it applies there too.
+
+        private void UpdateEngineSignals()
+        {
+            var (exch, mkt, _, _) = ResolveEffectiveIdentity();
+            bool supported = exch == ExchangeName.Binance && mkt == MarketKind.Perp;
+
+            if (!supported)
+            {
+                if (!_signalChartUnsupportedLogged)
+                {
+                    _signalChartUnsupportedLogged = true;
+                    try
+                    {
+                        LoggerHelper.LogInfo(this, "{0}", new object[]
+                        {
+                            $"AtasBridge: engine signal display only runs on the Binance|Perp chart; this chart resolved to {exch}|{mkt}, staying silent (no polling, no drawing)."
+                        });
+                    }
+                    catch { }
+                }
+                return;
+            }
+
+            CheckTerminalGraceExpiry();
+
+            // Re-apply every tick so the labels' Bar tracks CurrentBar (keeps
+            // them near the right edge as new bars form) even between polls.
+            if (_activeSignal != null) DrawSignalLines(_activeSignal);
+
+            int pollSec = Math.Max(5, SignalPollSeconds);
+            if ((DateTime.UtcNow - _lastSignalPollUtc).TotalSeconds < pollSec) return;
+            _lastSignalPollUtc = DateTime.UtcNow;
+            _ = PollSignalAsync();
+        }
+
+        private void CheckTerminalGraceExpiry()
+        {
+            if (_activeSignal?.IsTerminal == true && _activeSignal.TerminalSinceUtc.HasValue &&
+                (DateTime.UtcNow - _activeSignal.TerminalSinceUtc.Value).TotalMinutes >= SIGNAL_TERMINAL_GRACE_MINUTES)
+            {
+                ClearSignalDrawing();
+                _activeSignal = null;
+            }
+        }
+
+        private async Task PollSignalAsync()
+        {
+            if (_signalPollInFlight) return;
+            _signalPollInFlight = true;
+            try
+            {
+                var req = new HttpRequestMessage(HttpMethod.Get, $"{VpsUrl.TrimEnd('/')}/api/signal/latest");
+                if (!string.IsNullOrEmpty(AuthToken))
+                    req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", AuthToken);
+
+                var httpResp = await _http.SendAsync(req).ConfigureAwait(false);
+                if (!httpResp.IsSuccessStatusCode) { MarkSignalPollFail(); return; }
+
+                var json = await httpResp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                var resp = JsonSerializer.Deserialize<SignalLatestResponse>(json, _serOpts);
+
+                if (resp?.Id != null)
+                {
+                    ApplySignal(resp);
+                    MarkSignalPollOk();
+                }
+                else if (resp != null && string.Equals(resp.Status, "empty", StringComparison.OrdinalIgnoreCase))
+                {
+                    // No open signal on the server - clear whatever is drawn.
+                    ClearSignalDrawing();
+                    _activeSignal = null;
+                    MarkSignalPollOk();
+                }
+                else
+                {
+                    // {"status":"error",...} or an unrecognized response shape.
+                    // Treated like a poll failure for the status indicator;
+                    // existing drawing (if any) is left untouched.
+                    MarkSignalPollFail();
+                }
+            }
+            catch
+            {
+                MarkSignalPollFail();
+            }
+            finally
+            {
+                _signalPollInFlight = false;
+            }
+        }
+
+        private void MarkSignalPollOk()
+        {
+            _signalPollOk         = true;
+            _signalPollFailCount  = 0;
+            _lastSignalPollBjTime = DateTime.UtcNow.AddHours(8);
+        }
+
+        private void MarkSignalPollFail()
+        {
+            _signalPollOk = false;
+            _signalPollFailCount++;
+        }
+
+        private void ApplySignal(SignalLatestResponse resp)
+        {
+            if (!resp.Id.HasValue) return;
+
+            string status     = resp.Status ?? "open";
+            bool   isTerminal  = !string.Equals(status, "open", StringComparison.OrdinalIgnoreCase);
+            bool   isNewSignal = _activeSignal == null || _activeSignal.Id != resp.Id.Value;
+
+            if (isNewSignal)
+            {
+                ClearSignalDrawing();
+                _activeSignal = new ActiveSignal
+                {
+                    Id               = resp.Id.Value,
+                    Direction        = resp.Direction ?? "",
+                    Score            = resp.Score ?? 0,
+                    Entry            = (decimal)(resp.Entry ?? 0),
+                    Stop             = (decimal)(resp.Stop  ?? 0),
+                    T1               = (decimal)(resp.T1    ?? 0),
+                    T2               = (decimal)(resp.T2    ?? 0),
+                    Status           = status,
+                    IsTerminal       = isTerminal,
+                    TerminalSinceUtc = isTerminal ? DateTime.UtcNow : null,
+                };
+            }
+            else
+            {
+                bool wasTerminal = _activeSignal!.IsTerminal;
+                _activeSignal.Status     = status;
+                _activeSignal.IsTerminal = isTerminal;
+                if (isTerminal && !wasTerminal)
+                    _activeSignal.TerminalSinceUtc = DateTime.UtcNow;
+            }
+        }
+
+        // Draws/updates the four price lines + right-edge labels for the
+        // currently active signal. Called every tick (from
+        // UpdateEngineSignals) so the labels keep tracking CurrentBar; the
+        // underlying LineTillTouch/DrawingText objects are mutated in place
+        // rather than removed/re-added, which is cheap and avoids flicker.
+        private void DrawSignalLines(ActiveSignal sig)
+        {
+            try
+            {
+                int bar = Math.Max(0, CurrentBar);
+                Color entryColor  = sig.IsTerminal ? Color.Gray : Color.White;
+                Color stopColor   = sig.IsTerminal ? Color.Gray : Color.Red;
+                Color targetColor = sig.IsTerminal ? Color.Gray : Color.LightGreen;
+
+                _sigLineEntry = UpsertLine(_sigLineEntry, bar, sig.Entry, entryColor, DashStyle.Solid);
+                _sigLineStop  = UpsertLine(_sigLineStop,  bar, sig.Stop,  stopColor,  DashStyle.Solid);
+                _sigLineT1    = UpsertLine(_sigLineT1,    bar, sig.T1,    targetColor, DashStyle.Dash);
+                _sigLineT2    = UpsertLine(_sigLineT2,    bar, sig.T2,    targetColor, DashStyle.Dash);
+
+                string suffix = sig.IsTerminal ? $" [{sig.Status.ToUpperInvariant()}]" : "";
+                SetSignalLabel(SIG_TAG_ENTRY, bar, sig.Entry, $"ENTRY {sig.Entry:0.##} #{sig.Id} {sig.Direction}{suffix}", entryColor);
+                SetSignalLabel(SIG_TAG_STOP,  bar, sig.Stop,  $"STOP {sig.Stop:0.##}{suffix}", stopColor);
+                SetSignalLabel(SIG_TAG_T1,    bar, sig.T1,    $"T1 {sig.T1:0.##}{suffix}", targetColor);
+                SetSignalLabel(SIG_TAG_T2,    bar, sig.T2,    $"T2 {sig.T2:0.##}{suffix}", targetColor);
+            }
+            catch { }
+        }
+
+        private LineTillTouch UpsertLine(LineTillTouch? existing, int bar, decimal price, Color color, DashStyle dash)
+        {
+            if (existing != null)
+            {
+                existing.FirstPrice   = price;
+                existing.Pen.Color    = color;
+                existing.Pen.DashStyle = dash;
+                return existing;
+            }
+
+            // Phase 7I dual-platform support: LineTillTouch's Pen parameter
+            // type differs between the two ATAS SDK versions - ATAS X
+            // (8.0.14.644) uses Utils.Common.UniversalPen, the regular ATAS
+            // Platform build (8.0.14.290) uses plain System.Drawing.Pen.
+            // AtasBridge.Platform.csproj defines ATAS_PLATFORM to select the
+            // right one; everything else in this file is identical between
+            // the two builds (confirmed via reflection - same API otherwise).
+#if ATAS_PLATFORM
+            var pen = new System.Drawing.Pen(color, 2f) { DashStyle = dash };
+#else
+            var pen = new UniversalPen(color, 2f) { DashStyle = dash };
+#endif
+            var line = new LineTillTouch(bar, price, pen) { IsRay = true };
+            HorizontalLinesTillTouch.Add(line);
+            return line;
+        }
+
+        private void SetSignalLabel(string tag, int bar, decimal price, string text, Color color)
+        {
+            Labels[tag] = new DrawingText(TickSize)
+            {
+                Text         = text,
+                Bar          = bar,
+                TextPrice    = price,
+                IsAbovePrice = true,
+                Textcolor    = color,
+                FontSize     = 11f,
+                Tag          = tag
+            };
+        }
+
+        // Removes all four signal price lines + labels from the chart.
+        // Called on: new signal replacing an old one, {"status":"empty"}
+        // response, the 30-minute terminal grace timeout, and OnDispose
+        // (indicator unload) - the last one is what step 3's self-check
+        // ("no leftover drawing objects after unload") verifies.
+        private void ClearSignalDrawing()
+        {
+            try
+            {
+                if (_sigLineEntry != null) { HorizontalLinesTillTouch.Remove(_sigLineEntry); _sigLineEntry = null; }
+                if (_sigLineStop  != null) { HorizontalLinesTillTouch.Remove(_sigLineStop);  _sigLineStop  = null; }
+                if (_sigLineT1    != null) { HorizontalLinesTillTouch.Remove(_sigLineT1);    _sigLineT1    = null; }
+                if (_sigLineT2    != null) { HorizontalLinesTillTouch.Remove(_sigLineT2);    _sigLineT2    = null; }
+                Labels.Remove(SIG_TAG_ENTRY);
+                Labels.Remove(SIG_TAG_STOP);
+                Labels.Remove(SIG_TAG_T1);
+                Labels.Remove(SIG_TAG_T2);
+            }
+            catch { }
         }
 
         // ══ Phase 3: Large trade + update tracking ════════════════════════════
@@ -826,5 +1263,24 @@ namespace AtasBridge
         public double AskVol      { get; set; }
         public double Ratio       { get; set; }
         public string Source      { get; set; } = "AtasBridge/5.1";
+    }
+
+    // Phase 7I: GET /api/signal/latest response model. The endpoint (7G,
+    // unchanged by this card) reuses the same top-level "status" JSON key for
+    // two different meanings: the literal string "empty"/"error" when there
+    // is no row or a server-side exception, OR (when a real engine_signals
+    // row is returned) that row's own lifecycle status ("open"/"stopped"/
+    // "t1_then_stop"/"t2_hit"/"expired"). Disambiguate in code by checking
+    // Id.HasValue first - a real row always has an id, empty/error never do.
+    public sealed class SignalLatestResponse
+    {
+        public string? Status    { get; set; }
+        public int?    Id        { get; set; }
+        public string? Direction { get; set; }
+        public double? Score     { get; set; }
+        public double? Entry     { get; set; }
+        public double? Stop      { get; set; }
+        public double? T1        { get; set; }
+        public double? T2        { get; set; }
     }
 }

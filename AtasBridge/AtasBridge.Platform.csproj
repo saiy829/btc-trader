@@ -1,0 +1,55 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <AssemblyName>AtasBridge</AssemblyName>
+    <RootNamespace>AtasBridge</RootNamespace>
+    <Optimize>true</Optimize>
+    <DefineConstants>ATAS_PLATFORM</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Same source file as the ATAS X build (C:\AtasBridge\AtasBridge.cs) -
+         no source changes needed, only the referenced assemblies differ. -->
+    <Compile Include="..\AtasBridge\AtasBridge.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="ATAS.Indicators">
+      <HintPath>D:\Program Files\ATAS Platform\ATAS.Indicators.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="ATAS.DataFeedsCore">
+      <HintPath>D:\Program Files\ATAS Platform\ATAS.DataFeedsCore.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Utils.Common">
+      <HintPath>D:\Program Files\ATAS Platform\Utils.Common.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="OFT.Rendering">
+      <HintPath>D:\Program Files\ATAS Platform\OFT.Rendering.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- The copy bundled in the ATAS Platform folder is a stale v8.0.0.0,
+         but ATAS.Indicators.dll there actually needs v10.0.0.0 (resolved at
+         runtime from the .NET shared framework, not the bundled copy) -
+         reference that instead to avoid a version mismatch at compile time. -->
+    <Reference Include="System.Drawing.Common">
+      <HintPath>C:\Program Files\dotnet\shared\Microsoft.WindowsDesktop.App\10.0.2\System.Drawing.Common.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- Copies to the regular ATAS's own Indicators folder (separate from
+       ATAS X's %APPDATA%\ATAS X\Indicators\), mirroring the same
+       auto-copy convention as the ATAS X build. -->
+  <Target Name="CopyToATASPlatform" AfterTargets="Build">
+    <Copy
+      SourceFiles="$(TargetPath)"
+      DestinationFolder="$(APPDATA)\ATAS\Indicators\"
+      OverwriteReadOnlyFiles="true"
+      SkipUnchangedFiles="false" />
+    <Message Text="AtasBridge.dll -> ATAS\Indicators\ (regular ATAS Platform build)" Importance="high" />
+  </Target>
+</Project>

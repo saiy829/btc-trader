@@ -25,6 +25,17 @@
 - AtasBridge.dll 版本号自 2026-07-06 起采用 `v日期-当日序号` 格式
   （如 `v2026.07.08-1`），`CHANGELOG_AtasBridge.md` 同步遵循；
   此前的旧版本号（如 v5.0/v5.1）不追溯改写。
+- **AtasBridge.dll 每次升级必须同时交付两个平台的构建（2026-07-06 起，
+  任务卡7I 确立）**：本机同时装了 ATAS X（Avalonia渲染，SDK v8.0.14.644，
+  指标目录 `%APPDATA%\ATAS X\Indicators\`）和普通版 ATAS Platform
+  （WPF渲染，SDK v8.0.14.290，指标目录 `%APPDATA%\ATAS\Indicators\`）。
+  两版本SDK核心API一致，但个别类型有差异（如 `LineTillTouch` 构造函数的
+  Pen参数：ATAS X 用 `Utils.Common.UniversalPen`，普通版用标准
+  `System.Drawing.Pen`）。源码目录下 `AtasBridge.csproj`（ATAS X）和
+  `AtasBridge.Platform.csproj`（普通版）共用同一份 `AtasBridge.cs`，
+  仅用 `#if ATAS_PLATFORM` 分支处理差异点，编译后各自自动复制到对应
+  指标目录。以后任何 AtasBridge.cs 改动，两个 csproj 都要重新编译验证，
+  不能只更新其中一个平台。
 
 ### Claude 读取 GitHub 文件方法：
 ```bash
@@ -660,6 +671,8 @@ tail -20 /opt/btc-trader/logs/git_sync.log
 | 2026-07-06 | Bug#31（7H发现）：atas_bars表长期缺少唯一约束，AtasBridge.dll重连/重推同一根K线会被当成新行插入，产生同时间戳多行的隐性重复；修复：加(exchange,market_type,timestamp,timeframe)唯一索引+/atas/bar改INSERT OR REPLACE，历史5857→5760行(97条重复)去重，07-01两行OKX永续×100污染值订正 |
 | 2026-07-06 | Phase 7H 阶段1（侦察）：AtasBridge.dll v2026.07.06-1新增身份侦察模式(ShowIdentityLabel)，图表角标+日志摊开显示InstrumentInfo/TradingManager.Security全部原始身份字段，只加不改，交付后等Sea四张图截图确认真实取值再做阶段2自动解析(7F教训：不凭API文档假设解析规则) |
 | 2026-07-06 | Phase 7H 阶段2（正式）：AtasBridge.dll v2026.07.06-2，基于四图真实截图确认的规则——仅用InstrumentInfo.Exchange精确匹配(Binance/BinanceFutures/OkxSpot/OkxPerpFutures四值，OKX两图TradingManager.Security恒为null不可用)，新增IdentityMode(Auto默认/Manual)，OKX×0.01换算与三个推送方法的exchange/market_type字段统一改用ResolveEffectiveIdentity()最终生效身份，Auto解析失败等同Unset(不猜测)，Auto与手动下拉框冲突时角标变黄但数据仍按Auto值；角标从阶段1原始字段摊开改为运营状态显示(AUTO/MANUAL+推送✓/✗+时间) |
+| 2026-07-06 | Bug#32（7I发现）：AtasBridge.dll只在ATAS X(Avalonia渲染,SDK v8.0.14.644)编译测试过，Sea导入普通版ATAS Platform(WPF渲染,SDK v8.0.14.290)时报ReflectionTypeLoadException缺Avalonia.Base；反射逐项核对两版本SDK发现核心API一致，仅LineTillTouch构造函数的Pen参数类型不同(ATAS X用UniversalPen/普通版用System.Drawing.Pen)，且普通版Platform目录自带的System.Drawing.Common.dll是过时的v8.0.0.0(它自己的ATAS.Indicators.dll实际要v10.0.0.0，需从.NET共享框架解析)；修复：新增AtasBridge.Platform.csproj共用同一份AtasBridge.cs，用#if ATAS_PLATFORM分支处理Pen差异，两个csproj各自编译产出双平台DLL
+| 2026-07-06 | 任务卡7I：DLL信号显示层+角标改进+双平台构建支持——AtasBridge.dll v2026.07.06-3~5，轮询GET /api/signal/latest(7G预埋,服务器零改动)仅在Binance|Perp图绘制entry/stop/t1/t2四条价格线(HorizontalLinesTillTouch)+图表上方ENGINE信号行，终态信号变灰30分钟后自动清除，轮询失败不清线；角标位置改可设置(LabelPosition+OffsetX/Y，默认左下)，状态字符从✓/✗/≠改纯ASCII(OK/ERR(n)/!=，此前非ASCII字符在Sea机器上渲染成方块)；新增AtasBridge.Platform.csproj支持普通版ATAS(Bug#32)，确立"每次升级须同时交付两平台构建"的核心约定
 
 ### 路线图（7系列，本表未覆盖的更早阶段详见上表）
 - [x] 7A / 7A-2 / 7A-3：简报综合信号分代码化 + 14档三因子映射 + Markdown清洗
@@ -668,11 +681,10 @@ tail -20 /opt/btc-trader/logs/git_sync.log
 - [x] 7F：AtasBridge 原生吸收检测 + 全字段 Telegram 推送
 - [x] 7G：VPS 常驻信号引擎（阈值触发 + 模拟信号登记 + 结果自跟踪）
 - [x] 7H：图表身份自动识别（阶段1侦察 + 阶段2正式）+ atas_bars 去重与订正
-- [ ] 7I（已登记，未开始）：DLL 信号显示层——AtasBridge 轮询
-  `GET /api/signal/latest`，将引擎信号（方向/入场/止损/目标1/目标2）以
-  价格线+标签绘制在图表上，终态信号自动清除；同卡顺带：角标位置改为
-  可设置（默认左下角）、角标状态字符改用纯ASCII（当前用了 ✓/✗/≠ 等
-  非ASCII符号）
+- [x] 7I：DLL 信号显示层（轮询 `/api/signal/latest`，Binance|Perp 图画
+  entry/stop/t1/t2 价格线 + ENGINE 信号行，终态30分钟后自动清除）+ 角标
+  位置可设置 + 状态字符改纯ASCII + 双平台构建支持（ATAS X / ATAS
+  Platform，见 Bug#32 与核心约定）
 
 ---
 
