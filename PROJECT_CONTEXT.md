@@ -620,6 +620,7 @@ tail -20 /opt/btc-trader/logs/git_sync.log
 | 2026-07-04 | Phase 7A-3：ai_analyst/briefing.py 新增 _sanitize() 代码兜底，清洗AI偶尔残留的###标题和**加粗**Markdown符号，不依赖AI是否听话 |
 | 2026-07-06 | Phase 7E：morning_monday 增加 TradFi 周初开盘窗口提示（全球外汇+CME Globex股指期货开盘，北京时间夏令时05:00-07:00/冬令时06:00-08:00自动切换，_monday_open_window()按美东dst()判断），提示常见BSL/SSL集中清扫 |
 | 2026-07-06 | 7E v2：structure_monitor 新增周一插针TG预警（扫PDH/PDL又收回，独立协程monday_sweep_loop与现有monitor_loop并行）；方法论文档同步补充窗口说明 |
+| 2026-07-06 | 7F：新增 _monday_window_stats() 用Binance 5m K线代码计算周一开盘窗口实测数据（开高低收/涨跌幅/振幅/PDH-PDL清扫判定），修复7E点评幻觉（AI未获窗口K线时编造走势） |
 
 ---
 
@@ -631,6 +632,13 @@ tail -20 /opt/btc-trader/logs/git_sync.log
 4. **CME 缺口自动退休**：当 BTC 涨过 $80,400，三个历史缺口全部填补，`_cme_block()` 自动输出退休提示
 5. **GitHub 同步滞后**：白天手动部署的文件要等次日 03:00 才同步到 GitHub
 6. **startup_guard.py 和 git_sync.sh**：这两个文件在 VPS 有，在 GitHub 暂时没有（需手动加入 git add 列表）
+
+### AI 简报历史 Bug 修复记录（AI 心算/编造导致的输出错误，编号顺延）：
+
+| # | Bug | 原因 | 修复 |
+|---|---|---|---|
+| 1 | 综合信号分与六维加权和对不上 | AI 自己心算综合分，2026-07-04实例：自报 composite=-12 但六维加权和=-4.8，两个数字互相矛盾 | 7A-2：改为 utils/signal_score.py 代码确定性计算，AI 只解读不计算 |
+| 2 | 周一窗口点评幻觉 | prompt 要求点评周一开盘窗口价格行为，但未注入窗口K线数据，AI 拼接其他区块数字编造走势（2026-07-06实例：编造63,115→63,617温和上行，实际62,610→约63,900强拉2%） | 7F：新增 _monday_window_stats() 用 Binance 5m K线代码计算窗口实测数据，作为权威数据块注入，AI 只解读不推算 |
 
 ---
 

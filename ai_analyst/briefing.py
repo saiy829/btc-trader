@@ -1,5 +1,5 @@
 """
-Claude AI 分析模块 v11
+Claude AI 分析模块 v12
 4种会话：morning / morning_monday / europe / evening / ondemand
 v6 更新：
 - max_tokens 按 session 分级（早盘13节内容多，提高到8192防止截断）
@@ -36,12 +36,22 @@ v11 更新（Phase 7E）：
   CME Globex股指期货开盘，北京时间夏令时05:00-07:00/冬令时06:00-08:00自动切换，
   _monday_open_window() 用 America/New_York 时区的 dst() 判断），提示该窗口
   常见 BSL/SSL 集中清扫，要求第4节IB分析结合该窗口点评清扫痕迹
+v12 更新（Phase 7F）：
+- 修复 7E 的点评幻觉：2026-07-06 早盘简报里 AI 被要求点评周一开盘窗口价格行为，
+  但没人往 prompt 里塞窗口K线数据，AI 就编了一段"63,115→63,617温和上行"，
+  实际当时是 62,610→约63,900 强拉2%。新增 _monday_window_stats() 用 Binance
+  5m K线代码计算窗口开高低收/涨跌幅/振幅，PDH/PDL优先复用 binance["yesterday"]
+  （与 DATA 数据块显示给 AI 的 PDH/PDL 同一份数据），清扫判定逻辑与
+  monitor/structure_monitor.py 的 monday_sweep_loop 一致。结果作为权威数据块
+  注入 MON_EXTRA，第4节指令改为"只解读、不得自行推算价格路径"；获取失败时
+  明确指令跳过窗口点评，不得凭其他数据推测
 """
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone, time as dtime
 from zoneinfo import ZoneInfo
 
 import anthropic
+import requests
 from utils.helpers import setup_logger, get_env
 from utils import signal_score
 
@@ -80,6 +90,127 @@ def _monday_open_window() -> tuple:
         return ("冬令时", "06:00", "08:00")
     except Exception:
         return ("夏令时5-7点/冬令时6-8点", "05:00", "08:00")
+
+
+_FUTURE_BASE = "https://fapi.binance.com"
+_SWEEP_MIN_PCT = float(get_env("SWEEP_BREACH_MIN_PCT", "0.03"))
+
+
+def _fetch_prev_day_high_low(prev_day_utc):
+    """
+    按 UTC 自然日取前一日高低（PDH/PDL）。用 limit=3 取 k[-2]（而非 limit=2
+    取 k[0]）：与 data_collector/binance_data.py 的 get_yesterday_ohlcv() /
+    monitor/structure_monitor.py 的 _get_pdh_pdl() 用同一套已验证写法。
+    仅在调用方未能传入已算好的 PDH/PDL 时才会被调用（见 _monday_window_stats）。
+    """
+    try:
+        resp = requests.get(
+            f"{_FUTURE_BASE}/fapi/v1/klines",
+            params={"symbol": "BTCUSDT", "interval": "1d", "limit": 3},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        k = resp.json()
+        y = k[-2]
+        return float(y[2]), float(y[3])
+    except Exception as e:
+        logger.warning(f"_fetch_prev_day_high_low 获取失败: {e}")
+        return None, None
+
+
+def _sweep_status_side(extreme_price, pd_price, close_price, is_upper: bool) -> str:
+    """
+    单侧（上方PDH/下方PDL）清扫判定，与 monitor/structure_monitor.py 的
+    _check_sweep() 判定逻辑一致：突破深度>=阈值 且 窗口收盘已收回 -> 清扫；
+    突破但未收回 -> 突破延续；未达突破深度阈值（含未触及）-> 无。
+    """
+    if pd_price is None:
+        return "无（PDH/PDL不可用）"
+    if is_upper:
+        if extreme_price <= pd_price:
+            return "无"
+        breach_pct = (extreme_price - pd_price) / pd_price * 100
+        if breach_pct < _SWEEP_MIN_PCT:
+            return "无"
+        if close_price < pd_price:
+            return f"清扫（极值${extreme_price:,.0f}，深度{breach_pct:.3f}%）"
+        return f"突破延续（极值${extreme_price:,.0f}，深度{breach_pct:.3f}%）"
+    else:
+        if extreme_price >= pd_price:
+            return "无"
+        breach_pct = (pd_price - extreme_price) / pd_price * 100
+        if breach_pct < _SWEEP_MIN_PCT:
+            return "无"
+        if close_price > pd_price:
+            return f"清扫（极值${extreme_price:,.0f}，深度{breach_pct:.3f}%）"
+        return f"突破延续（极值${extreme_price:,.0f}，深度{breach_pct:.3f}%）"
+
+
+def _monday_window_stats(day_utc=None, pdh=None, pdl=None):
+    """
+    周一 TradFi 周初开盘窗口（美东周日17:00 -> 北京时间08:00）的实测行情统计。
+    代码算好后作为权威数值注入 prompt，AI 只解读不得自行推算价格路径
+    （修复：2026-07-06 早盘简报未注入窗口K线，AI 拼接其他数字编造窗口走势）。
+
+    day_utc: 窗口终点（北京08:00）所在的 UTC 日期，默认今天，可传入历史日期回测。
+    pdh/pdl: 若调用方已有简报流程算好的 PDH/PDL（binance["yesterday"]的
+    high/low），直接传入复用，避免重复请求且与 DATA 数据块里显示给 AI 的
+    PDH/PDL 保持同一份数据；不传则退化为自行按 UTC 前一日高低计算。
+
+    返回 dict；任何异常均返回 None，只 log 不抛异常，不影响简报主流程。
+    """
+    try:
+        if day_utc is None:
+            day_utc = datetime.now(timezone.utc).date()
+        prev_day = day_utc - timedelta(days=1)
+
+        # 用窗口起点当天美东时间判断夏/冬令时，与 _monday_open_window() 同款逻辑，
+        # 但用窗口发生的实际日期而非"现在"，保证传入历史日期回测时判断正确
+        ny_ref = datetime.combine(prev_day, dtime(17, 0), tzinfo=ZoneInfo("America/New_York"))
+        start_hour_utc = 21 if ny_ref.dst() else 22
+
+        window_start = datetime.combine(prev_day, dtime(start_hour_utc, 0), tzinfo=timezone.utc)
+        window_end   = datetime.combine(day_utc,  dtime(0, 0),             tzinfo=timezone.utc)
+
+        resp = requests.get(
+            f"{_FUTURE_BASE}/fapi/v1/klines",
+            params={
+                "symbol": "BTCUSDT", "interval": "5m",
+                "startTime": int(window_start.timestamp() * 1000),
+                "endTime":   int(window_end.timestamp() * 1000),
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        klines = resp.json()
+        if not klines:
+            return None
+
+        opens  = [float(k[1]) for k in klines]
+        highs  = [float(k[2]) for k in klines]
+        lows   = [float(k[3]) for k in klines]
+        closes = [float(k[4]) for k in klines]
+
+        open_px, close_px = opens[0], closes[-1]
+        high_px, low_px   = max(highs), min(lows)
+        chg_pct   = (close_px - open_px) / open_px * 100
+        range_pct = (high_px - low_px) / open_px * 100
+
+        if pdh is None or pdl is None:
+            pdh, pdl = _fetch_prev_day_high_low(prev_day)
+
+        pdh_status = _sweep_status_side(high_px, pdh, close_px, is_upper=True)
+        pdl_status = _sweep_status_side(low_px,  pdl, close_px, is_upper=False)
+
+        return {
+            "open": open_px, "close": close_px, "high": high_px, "low": low_px,
+            "chg_pct": chg_pct, "range_pct": range_pct,
+            "pdh": pdh, "pdl": pdl,
+            "pdh_status": pdh_status, "pdl_status": pdl_status,
+        }
+    except Exception as e:
+        logger.warning(f"_monday_window_stats 获取失败: {e}")
+        return None
 
 
 def _oi_signal(oi_chg, price_chg):
@@ -356,8 +487,27 @@ ${ext.get("cb_price",0):,.0f}  溢价：{cb_prem:+.0f} USD  {cb_sig}
 {_liq_block(p, ib, y)}
 """
         MON_EXTRA = ""
+        MONDAY_IB_REVIEW = ""
         if session == "morning_monday":
             dst_label, w_start, w_end = _monday_open_window()
+            # [Phase 7F] 窗口实测数据代码计算注入，AI 只解读不得推算
+            # （修复：2026-07-06 早盘简报未注入窗口K线，AI 拼接其他区块数字编造窗口走势）
+            _wstats = _monday_window_stats(pdh=y.get("high"), pdl=y.get("low"))
+            if _wstats:
+                WINDOW_STATS_BLOCK = f"""
+【周一开盘窗口实测数据】（系统代码计算，权威数值，必须原样引用，禁止修改或推算任何数字）
+> 窗口区间：北京时间 {w_start}-08:00
+> 开盘 ${_wstats['open']:,.0f} → 收盘 ${_wstats['close']:,.0f}（涨跌 {_wstats['chg_pct']:+.2f}%），最高 ${_wstats['high']:,.0f} / 最低 ${_wstats['low']:,.0f}（振幅 {_wstats['range_pct']:.2f}%）
+> PDH 清扫判定：{_wstats['pdh_status']}
+> PDL 清扫判定：{_wstats['pdl_status']}"""
+                MONDAY_IB_REVIEW = ("\n   基于上方【周一开盘窗口实测数据】解读今晨窗口行为与 IB 方向的关系，"
+                                     "只解读、不得自行描述或推算价格路径")
+            else:
+                WINDOW_STATS_BLOCK = """
+【周一开盘窗口实测数据】窗口实测数据获取失败"""
+                MONDAY_IB_REVIEW = ("\n   周一开盘窗口实测数据获取失败，本节跳过窗口点评，"
+                                     "禁止凭其他数据推测窗口走势")
+
             MON_EXTRA = f"""
 === 【周一 结构回顾 & CME 历史缺口追踪】===
 {_cme_block(cme)}
@@ -372,8 +522,7 @@ ${ext.get("cb_price",0):,.0f}  溢价：{cb_prem:+.0f} USD  {cb_sig}
 > 北京时间 {w_start}-{w_end}（美东{dst_label}）= 全球外汇市场周初开盘 + CME Globex 股指期货开盘
 > 该窗口周末薄流动性切换回正常深度，常见 BSL/SSL 集中清扫（插针/假突破）
 > IB 形成前（08:00 前）出现的插针优先视为流动性清扫而非趋势，勿追第一波方向
-> 请在第4节 IB 分析中结合该窗口（{w_start}-08:00）的实际价格行为点评一句：
-  今晨是否出现清扫痕迹、清扫方向与 IB 突破方向是否一致
+{WINDOW_STATS_BLOCK}
 """
 
         return f"""你是专业 BTC 永续合约交易分析师（Binance BTCUSDT），
@@ -420,7 +569,7 @@ ${ext.get("cb_price",0):,.0f}  溢价：{cb_prem:+.0f} USD  {cb_sig}
 4.【今日 IB 分析·开盘类型确认】
    IB 宽度含义（趋势日/平衡日判断）
    开盘类型的具体含义与策略含义
-   30分钟观察期的价格行为解读
+   30分钟观察期的价格行为解读{MONDAY_IB_REVIEW}
 
 5.【昨日 Market Profile 结构】
    当前价格相对 PDH/PDL/PDC 的位置含义
