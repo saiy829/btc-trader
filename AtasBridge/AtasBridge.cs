@@ -1,0 +1,566 @@
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.ComponentModel.DataAnnotations;
+using System.Linq;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Runtime.CompilerServices;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Threading.Tasks;
+using ATAS.Indicators;
+
+namespace AtasBridge
+{
+    // 挂载此指标的图表连的是哪个交易所 / 哪个市场——手动选择，不做自动识别。
+    // 四个图表（币安现货/永续、OKX现货/永续）分别挂载时，各自选一次即可，
+    // 选完后 /atas/bar 和 /atas/trade 推送的 JSON 会自动带上这两个字段，
+    // VPS 侧凭这两个字段把四路数据分别存进 atas_bars/atas_large_trades，
+    // 不再混算。
+    //
+    // 2026-07-01 修复：Unset 现在是默认值（原来默认 Binance/Perp）。原因：
+    // 这两个设置是"每个图表实例各自独立"的，不是全局生效——如果某个图表
+    // 忘了手动选一次，原来会悄悄冒充"我是币安永续"，把别的市场的数据
+    // 污染进币安永续的统计里，而且从数据本身完全看不出来是哪个图表漏配置了。
+    // 默认改成 Unset 后，漏配置的图表会诚实地报 "unset"，VPS 侧会记警告日志，
+    // 一眼就能看出该去哪个图表补设置，不会悄悄污染真实数据。
+    public enum ExchangeName { Unset, Binance, Okx }
+    public enum MarketKind   { Unset, Spot, Perp }
+
+    [DisplayName("AtasBridge")]
+    [Description("BTC AI Bridge - Bar+Footprint+LargeTrade+Absorption (v5.1, multi-market)")]
+    public class AtasBridge : Indicator
+    {
+        [Display(Name = "VPS URL", GroupName = "1. Config", Order = 1)]
+        public string VpsUrl { get; set; } = "https://mb.661688.xyz";
+
+        [Display(Name = "Auth Token", GroupName = "1. Config", Order = 2)]
+        public string AuthToken { get; set; } = "";
+
+        [Display(Name = "Timeframe Label", GroupName = "1. Config", Order = 3)]
+        public string Timeframe { get; set; } = "5m";
+
+        // ── v5.0 新增：这张图表的身份标签（默认Unset，必须手动选一次）────
+        [Display(Name = "Exchange", GroupName = "1. Config", Order = 4)]
+        public ExchangeName Exchange { get; set; } = ExchangeName.Unset;
+
+        [Display(Name = "Market Type", GroupName = "1. Config", Order = 5)]
+        public MarketKind MarketType { get; set; } = MarketKind.Unset;
+
+        [Display(Name = "Enable Bar Push", GroupName = "2. Switch", Order = 1)]
+        public bool EnableBarPush { get; set; } = true;
+
+        [Display(Name = "Enable Trade Push", GroupName = "2. Switch", Order = 2)]
+        public bool EnableTradePush { get; set; } = true;
+
+        [Display(Name = "Enable Footprint", GroupName = "2. Switch", Order = 3)]
+        public bool EnableFootprint { get; set; } = true;
+
+        // Phase 7F: native absorption detection, replaces the old ATAS built-in
+        // Absorption webhook (/atas/signal) which cannot carry price/volume.
+        [Display(Name = "Enable Absorption Push", GroupName = "2. Switch", Order = 4)]
+        public bool EnableAbsorptionPush { get; set; } = true;
+
+        [Display(Name = "Medium BTC (db only)", GroupName = "3. Thresholds", Order = 1)]
+        public decimal ThresholdMedium { get; set; } = 20m;
+
+        [Display(Name = "Large BTC (db+TG)", GroupName = "3. Thresholds", Order = 2)]
+        public decimal ThresholdLarge { get; set; } = 100m;
+
+        [Display(Name = "Whale BTC (urgent TG)", GroupName = "3. Thresholds", Order = 3)]
+        public decimal ThresholdWhale { get; set; } = 300m;
+
+        [Display(Name = "Min level volume BTC", GroupName = "3. Thresholds", Order = 4)]
+        public decimal FpMinVolume { get; set; } = 3m;
+
+        // Phase 7F: absorption thresholds. Dominant side volume (BTC, already
+        // converted for OKX perp) must reach AbsorbMinBtc AND be at least
+        // AbsorbRatio times the opposite side to count as absorption.
+        [Display(Name = "Absorb Min BTC", GroupName = "4. Absorption", Order = 1)]
+        public decimal AbsorbMinBtc { get; set; } = 15.0m;
+
+        [Display(Name = "Absorb Ratio", GroupName = "4. Absorption", Order = 2)]
+        public decimal AbsorbRatio { get; set; } = 3.0m;
+
+        private static readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(10) };
+
+        private decimal  _cvd     = 0m;
+        private string   _cvdDate = "";
+        private int      _lastBar = -1;
+        private decimal? _pocPrice  = null;
+        private decimal  _barDelta  = 0m;
+
+        // Phase 7F: absorption dedup state. Tracked separately from _lastBar
+        // (which gates the closed-bar push) because absorption must be checked
+        // on every tick of the still-forming current bar, not once per close.
+        private int _absorbBar = -1;
+        private readonly HashSet<(decimal price, string side)> _absorbSeen = new();
+
+        // --- large trade dedup ---
+        // 2026-07-01 重构：原来用单变量 _lastTrade/_lastLevel 只记"最近一笔"，
+        // 如果两笔不同方向/不同价位的单子几乎同时在累积（买方在A价位堆量的
+        // 同时卖方在B价位也在堆量，市场里很常见），后触发的会把前一笔的追踪
+        // 状态覆盖掉——前一笔继续更新时会被误判成"全新的单子"，导致重复推送。
+        // 改用 ConditionalWeakTable 按每个 trade 对象独立追踪，互不干扰；
+        // 同时顺便记录"首次识别时的量/首次识别时间/更新次数"，用于诊断——
+        // 下次再出现"消息报了个大数字但盘面看不出来"这种情况，可以直接从
+        // 消息里的"累计轨迹"判断：是几秒内平缓涨上去的（大概率真实），
+        // 还是几乎瞬间跳上去的（值得怀疑 ATAS 内部把不相关的东西合并了）。
+        private readonly ConditionalWeakTable<CumulativeTrade, TradeTrack> _tracked = new();
+
+        private sealed class TradeTrack
+        {
+            public string   LastLevel    = "";
+            public decimal  FirstVolume;
+            public DateTime FirstSeenUtc;
+            public int      UpdateCount;
+        }
+
+        public AtasBridge() : base(true) { DenyToChangePanel = true; }
+
+        // ── OKX 永续合约"张→BTC"换算 ─────────────────────────────────────
+        // OKX 永续合约(SWAP)成交量单位是"张"(contract)，1张=0.01 BTC（OKX官方
+        // 文档；这个项目在爆仓监控那条独立管线里已经踩过一次同样的坑并修过，
+        // 参见 monitor/liquidation_monitor.py 里 sz*0.01*price 那处）。ATAS 从
+        // OKX 拿到的原始 Volume/Delta/Bid/Ask/OI 等字段大概率也是"张数"未转换
+        // 成 BTC——现货和币安都是直接以 BTC 计价，不受影响。
+        //
+        // 这个换算是根据"OKX永续单笔动辄千万级别、且正好是100倍(对应0.01这个
+        // 系数)"这个现象反推出来的，不是查了ATAS官方文档确认的，需要部署后
+        // 用 ATAS 自带的 Big trades / Cluster Search 指标交叉核对同一笔OKX
+        // 永续大单的数量级来验证方向对不对，如果反了这个乘数很容易撤回。
+        //
+        // 换算必须在"判断是否达到大单门槛"之前就应用，不能只在推送给VPS的
+        // 最后一刻才转换——否则 CheckAndPost 里会拿"张数"直接跟以BTC为单位
+        // 的 Medium/Large/Whale 门槛比较，把很多稀松平常的小额OKX成交(比如
+        // 3-5 BTC)误判成"大额"甚至"鲸鱼级"，这很可能也是 OKX 这边消息明显
+        // 比其他三路更频繁的原因之一。
+        private const decimal OKX_CONTRACT_TO_BTC = 0.01m;
+
+        private decimal VolumeUnitMultiplier =>
+            (Exchange == ExchangeName.Okx && MarketType == MarketKind.Perp)
+                ? OKX_CONTRACT_TO_BTC : 1.0m;
+
+        // ══ Phase 2A + 2B: Bar + Footprint ═══════════════════════════════════
+
+        protected override void OnCalculate(int bar, decimal value)
+        {
+            // Phase 7F: must run before the "bar <= _lastBar" early return below,
+            // because absorption needs to be checked on every tick of the
+            // still-forming current bar, not just once when a bar closes.
+            if (EnableAbsorptionPush) CheckAbsorption(bar);
+
+            if (bar <= _lastBar) return;
+            if (bar == 0) { _lastBar = 0; return; }
+
+            int closedBar = bar - 1;
+            var candle = GetCandle(closedBar);
+            if (candle is null) { _lastBar = bar; return; }
+
+            try
+            {
+                // 2026-07-01 修复：跟 bjTime 那处是同一个bug——如果 candle.LastTime
+                // 也存在 Kind=Unspecified 但取值其实是UTC的情况，.ToUniversalTime()
+                // 会把它误当成本地(北京)时间倒扣8小时，导致算出来的"K线年龄"凭空多了
+                // 8小时，8小时远超下面10分钟的阈值，等于每一根K线都会被判定"太旧"而
+                // 直接跳过、永远推不到 /atas/bar。改用 SpecifyKind 避免这个误判。
+                var candleUtc = DateTime.SpecifyKind(candle.LastTime, DateTimeKind.Utc);
+                if ((DateTime.UtcNow - candleUtc).TotalMinutes > 10)
+                {
+                    _pocPrice = candle.MaxVolumePriceInfo?.Price;
+                    _barDelta = candle.Delta * VolumeUnitMultiplier;
+                    _lastBar  = bar;
+                    return;
+                }
+            }
+            catch { _lastBar = bar; return; }
+
+            string today = DateTime.UtcNow.ToString("yyyy-MM-dd");
+            if (_cvdDate != today) { _cvd = 0m; _cvdDate = today; }
+            _cvd += candle.Delta * VolumeUnitMultiplier;
+
+            _pocPrice = candle.MaxVolumePriceInfo?.Price;
+            _barDelta = candle.Delta * VolumeUnitMultiplier;
+
+            if (EnableBarPush) _ = PostBarAsync(candle);
+            _lastBar = bar;
+        }
+
+        private async Task PostBarAsync(IndicatorCandle c)
+        {
+            try
+            {
+                // 2026-07-01 修复：c.LastTime 的 DateTimeKind 是 Unspecified，但取值
+                // 其实已经是 UTC（交易所时间戳）。用 .ToUniversalTime() 会被 .NET
+                // 误判成"这是本机所在时区(北京)的当地时间"，先倒扣8小时"转成UTC"，
+                // 之后再 .AddHours(8) 加回来，两步相互抵消，最终结果还是原始UTC值，
+                // 只是被打上了错误的"+08:00"标签——这就是之前 Telegram 推送里显示的
+                // 时间比真实北京时间整整慢8小时的原因。改用 SpecifyKind 明确声明
+                // 原始值就是 UTC，不经过 .NET 的本地时区猜测，再加8小时得到真正北京时间。
+                var bjTime = DateTime.SpecifyKind(c.LastTime, DateTimeKind.Utc).AddHours(8);
+                var mult   = VolumeUnitMultiplier;
+                double? poc  = c.MaxVolumePriceInfo?.Price        is decimal p1 ? (double)p1 : null;
+                double? mpd  = c.MaxPositiveDeltaPriceInfo?.Price is decimal p2 ? (double)p2 : null;
+                double? mnd  = c.MaxNegativeDeltaPriceInfo?.Price is decimal p3 ? (double)p3 : null;
+                double? mtk  = c.MaxTickPriceInfo?.Price          is decimal p4 ? (double)p4 : null;
+
+                // ── Footprint: top 10 by volume + top 5 bid-absorb + top 5 ask-absorb
+                List<FpLevel>? topLevels = null;
+                if (EnableFootprint)
+                {
+                    // 最小量门槛用换算后的量比较（FpMinVolume是以BTC为单位设置的）
+                    var allRaw = c.GetAllPriceLevels()
+                        .Where(l => l != null && l.Volume * mult >= FpMinVolume)
+                        .ToList();
+
+                    if (allRaw.Count > 0)
+                    {
+                        var byVol = allRaw
+                            .OrderByDescending(l => l.Volume)
+                            .Take(10)
+                            .Select(l => ToFpLevel(l, "vol", mult));
+
+                        var bidAbsorb = allRaw
+                            .Where(l => l.Ask > 0 && l.Bid / l.Ask >= 2.0m)
+                            .OrderByDescending(l => l.Bid)
+                            .Take(5)
+                            .Select(l => ToFpLevel(l, "bid_absorb", mult));
+
+                        var askAbsorb = allRaw
+                            .Where(l => l.Bid > 0 && l.Ask / l.Bid >= 2.0m)
+                            .OrderByDescending(l => l.Ask)
+                            .Take(5)
+                            .Select(l => ToFpLevel(l, "ask_absorb", mult));
+
+                        topLevels = byVol
+                            .Concat(bidAbsorb)
+                            .Concat(askAbsorb)
+                            .DistinctBy(l => l.Price)
+                            .ToList();
+                    }
+                }
+
+                var payload = new BarPayload
+                {
+                    Timestamp        = bjTime.ToString("yyyy-MM-ddTHH:mm:ss+08:00"),
+                    Timeframe        = Timeframe,
+                    Exchange         = Exchange.ToString().ToLowerInvariant(),
+                    MarketType       = MarketType.ToString().ToLowerInvariant(),
+                    Open             = (double)c.Open,
+                    High             = (double)c.High,
+                    Low              = (double)c.Low,
+                    Close            = (double)c.Close,
+                    Volume           = (double)(c.Volume * mult),
+                    AskVol           = (double)(c.Ask * mult),
+                    BidVol           = (double)(c.Bid * mult),
+                    Delta            = (double)(c.Delta * mult),
+                    CumulativeDelta  = (double)_cvd,
+                    MaxDelta         = (double)(c.MaxDelta * mult),
+                    MinDelta         = (double)(c.MinDelta * mult),
+                    MaxOi            = (double)(c.MaxOI * mult),
+                    MinOi            = (double)(c.MinOI * mult),
+                    OiChange         = (double)((c.MaxOI - c.MinOI) * mult),
+                    PocPrice         = poc,
+                    MaxVolPrice      = poc,
+                    MaxPosDeltaPrice = mpd,
+                    MaxNegDeltaPrice = mnd,
+                    MaxTickPrice     = mtk,
+                    TopLevels        = topLevels,
+                    Source           = "AtasBridge/5.1"
+                };
+                await SendAsync("/atas/bar", payload);
+            }
+            catch { }
+        }
+
+        private FpLevel ToFpLevel(PriceVolumeInfo l, string tag, decimal mult) => new FpLevel
+        {
+            Price  = (double)l.Price,
+            Volume = (double)(l.Volume * mult),
+            Bid    = (double)(l.Bid * mult),
+            Ask    = (double)(l.Ask * mult),
+            Delta  = (double)((l.Ask - l.Bid) * mult),
+            Tag    = tag
+        };
+
+        // ══ Phase 7F: native absorption detection ══════════════════════════════
+        // Runs on the still-forming current bar's footprint on every tick.
+        // For each price level: whichever side (bid/ask) dominates is compared
+        // against AbsorbMinBtc and AbsorbRatio; if both thresholds are met this
+        // counts as absorption at that price. Same (price, side) only fires once
+        // per bar — the dedup set is cleared whenever a new bar starts.
+
+        private void CheckAbsorption(int bar)
+        {
+            if (bar != _absorbBar)
+            {
+                _absorbBar = bar;
+                _absorbSeen.Clear();
+            }
+
+            var candle = GetCandle(bar);
+            if (candle is null) return;
+
+            var mult = VolumeUnitMultiplier;
+            foreach (var level in candle.GetAllPriceLevels())
+            {
+                if (level is null) continue;
+
+                decimal bid = level.Bid * mult;
+                decimal ask = level.Ask * mult;
+
+                string  side;
+                decimal dominant, other;
+                if (bid > ask)      { side = "bid_absorb"; dominant = bid; other = ask; }
+                else if (ask > bid) { side = "ask_absorb"; dominant = ask; other = bid; }
+                else continue;
+
+                if (dominant < AbsorbMinBtc) continue;
+
+                decimal ratio = other > 0 ? dominant / other : decimal.MaxValue;
+                if (ratio < AbsorbRatio) continue;
+
+                var key = (level.Price, side);
+                if (!_absorbSeen.Add(key)) continue;   // already fired this bar
+
+                _ = PostAbsorptionAsync(level.Price, side, dominant, bid, ask, ratio);
+            }
+        }
+
+        private async Task PostAbsorptionAsync(decimal price, string side, decimal absorbedBtc,
+                                                decimal bidVol, decimal askVol, decimal ratio)
+        {
+            try
+            {
+                var bjTime = DateTime.UtcNow.AddHours(8);
+                var payload = new AbsorptionPayload
+                {
+                    Timestamp   = bjTime.ToString("yyyy-MM-ddTHH:mm:ss+08:00"),
+                    Exchange    = Exchange.ToString().ToLowerInvariant(),
+                    MarketType  = MarketType.ToString().ToLowerInvariant(),
+                    Side        = side,
+                    Price       = (double)price,
+                    AbsorbedBtc = (double)absorbedBtc,
+                    BidVol      = (double)bidVol,
+                    AskVol      = (double)askVol,
+                    // Cap the reported ratio when the opposite side is ~0 so the
+                    // JSON number stays sane instead of an astronomically large value
+                    Ratio       = (double)Math.Min(ratio, 999m),
+                    Source      = "AtasBridge/5.1"
+                };
+                await SendAsync("/atas/absorption", payload);
+            }
+            catch { }
+        }
+
+        // ══ Phase 3: Large trade + update tracking ════════════════════════════
+
+        protected override void OnCumulativeTrade(CumulativeTrade trade)
+        {
+            if (!EnableTradePush) return;
+            CheckAndPost(trade, isUpdate: false);
+        }
+
+        protected override void OnUpdateCumulativeTrade(CumulativeTrade trade)
+        {
+            if (!EnableTradePush) return;
+            CheckAndPost(trade, isUpdate: true);
+        }
+
+        private void CheckAndPost(CumulativeTrade trade, bool isUpdate)
+        {
+            // 门槛判断必须用换算后的量——OKX永续原始trade.Volume是"张数"，
+            // 不转换直接跟以BTC为单位的门槛比较，会把很多平常大小的成交
+            // 误判成大额/鲸鱼级
+            decimal volumeBtc = trade.Volume * VolumeUnitMultiplier;
+            if (volumeBtc < ThresholdMedium) return;
+
+            string level = volumeBtc >= ThresholdWhale ? "whale"
+                         : volumeBtc >= ThresholdLarge ? "large"
+                         : "medium";
+
+            bool isFirstSeen = !_tracked.TryGetValue(trade, out var track);
+            if (isFirstSeen)
+            {
+                track = new TradeTrack
+                {
+                    FirstVolume  = volumeBtc,
+                    FirstSeenUtc = DateTime.UtcNow,
+                };
+                _tracked.Add(trade, track);
+            }
+            track!.UpdateCount++;
+
+            // Only re-post if this trade crossed a new (higher) threshold level
+            bool isUpgraded = !isFirstSeen && track.LastLevel != level &&
+                               LevelRank(level) > LevelRank(track.LastLevel);
+
+            if (!isFirstSeen && !isUpgraded) return;
+
+            track.LastLevel = level;
+            _ = PostTradeAsync(trade, volumeBtc, level, isUpdate && !isFirstSeen, track);
+        }
+
+        private static int LevelRank(string l) =>
+            l == "whale" ? 3 : l == "large" ? 2 : 1;
+
+        private async Task PostTradeAsync(CumulativeTrade trade, decimal volumeBtc, string level, bool isUpdate, TradeTrack track)
+        {
+            try
+            {
+                // 时区修复同 PostBarAsync，原因见那边的详细注释
+                var bjTime     = DateTime.SpecifyKind(trade.Time, DateTimeKind.Utc).AddHours(8);
+                var dirStr     = trade.Direction.ToString();
+                var dir        = dirStr.IndexOf("Buy", StringComparison.OrdinalIgnoreCase) >= 0
+                                 ? "buy" : "sell";
+                var tradePrice = trade.FirstPrice;
+                var volUsd     = (double)(volumeBtc * tradePrice);
+
+                double? distPct = null;
+                if (_pocPrice.HasValue && _pocPrice.Value > 0)
+                    distPct = Math.Round(
+                        (double)((tradePrice - _pocPrice.Value) / _pocPrice.Value * 100m), 3);
+
+                var payload = new TradePayload
+                {
+                    Timestamp        = bjTime.ToString("yyyy-MM-ddTHH:mm:ss.fff+08:00"),
+                    Exchange         = Exchange.ToString().ToLowerInvariant(),
+                    MarketType       = MarketType.ToString().ToLowerInvariant(),
+                    Price            = (double)tradePrice,
+                    Volume           = (double)volumeBtc,
+                    VolumeUsd        = volUsd,
+                    Direction        = dir,
+                    ThresholdLevel   = level,
+                    IsUpdate         = isUpdate,
+                    NearPoc          = distPct.HasValue && Math.Abs(distPct.Value) < 0.15,
+                    PocPrice         = _pocPrice.HasValue ? (double?)_pocPrice.Value : null,
+                    DistFromPocPct   = distPct,
+                    CurrentBarDelta  = (double)_barDelta,
+                    CurrentCvd       = (double)_cvd,
+                    // 诊断字段：这笔单子首次被识别到时的量 / 从首次识别到现在过了多久 /
+                    // 期间 OnUpdateCumulativeTrade 触发了几次——帮助判断这个最终量
+                    // 是平缓累积上来的，还是可疑地"凭空跳出来"的
+                    FirstSeenVolume  = (double)track.FirstVolume,
+                    GrowthSeconds    = (DateTime.UtcNow - track.FirstSeenUtc).TotalSeconds,
+                    UpdateCount      = track.UpdateCount,
+                    Source           = "AtasBridge/5.1"
+                };
+                await SendAsync("/atas/trade", payload);
+            }
+            catch { }
+        }
+
+        // ── HTTP helper ────────────────────────────────────────────────────────
+
+        private async Task SendAsync<T>(string path, T payload)
+        {
+            var json = JsonSerializer.Serialize(payload, _serOpts);
+            var req  = new HttpRequestMessage(HttpMethod.Post,
+                           $"{VpsUrl.TrimEnd('/')}{path}")
+            {
+                Content = new StringContent(json, Encoding.UTF8, "application/json")
+            };
+            if (!string.IsNullOrEmpty(AuthToken))
+                req.Headers.Authorization =
+                    new AuthenticationHeaderValue("Bearer", AuthToken);
+            await _http.SendAsync(req).ConfigureAwait(false);
+        }
+
+        private static readonly JsonSerializerOptions _serOpts = new()
+        {
+            PropertyNamingPolicy   = JsonNamingPolicy.SnakeCaseLower,
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        };
+    }
+
+    // ── Data models ────────────────────────────────────────────────────────────
+
+    public sealed class FpLevel
+    {
+        public double Price  { get; set; }
+        public double Volume { get; set; }
+        public double Bid    { get; set; }
+        public double Ask    { get; set; }
+        public double Delta  { get; set; }
+        public string Tag    { get; set; } = "";
+    }
+
+    public sealed class BarPayload
+    {
+        public string        Timestamp        { get; set; } = "";
+        public string        Timeframe        { get; set; } = "5m";
+        // v5.0 新增：这两个字段序列化后是 "exchange"/"market_type"，
+        // 值是纯小写字符串（"binance"/"okx"、"spot"/"perp"），在
+        // PostBarAsync 里由 Exchange/MarketType 这两个设置项(枚举类型)
+        // 转成字符串后手动赋值——特意不直接序列化枚举本身，因为
+        // System.Text.Json 默认把枚举序列化成数字，那样VPS那边就要
+        // 反过来猜0/1对应哪个交易所，容易出错，不如直接给字符串。
+        public string        Exchange         { get; set; } = "";
+        public string        MarketType       { get; set; } = "";
+        public double        Open             { get; set; }
+        public double        High             { get; set; }
+        public double        Low              { get; set; }
+        public double        Close            { get; set; }
+        public double        Volume           { get; set; }
+        public double        AskVol           { get; set; }
+        public double        BidVol           { get; set; }
+        public double        Delta            { get; set; }
+        public double        CumulativeDelta  { get; set; }
+        public double        MaxDelta         { get; set; }
+        public double        MinDelta         { get; set; }
+        public double        MaxOi            { get; set; }
+        public double        MinOi            { get; set; }
+        public double        OiChange         { get; set; }
+        public double?       PocPrice         { get; set; }
+        public double?       MaxVolPrice      { get; set; }
+        public double?       MaxPosDeltaPrice { get; set; }
+        public double?       MaxNegDeltaPrice { get; set; }
+        public double?       MaxTickPrice     { get; set; }
+        public List<FpLevel>? TopLevels       { get; set; }
+        public string        Source           { get; set; } = "AtasBridge/5.1";
+    }
+
+    public sealed class TradePayload
+    {
+        public string  Timestamp       { get; set; } = "";
+        // v5.0 新增，同 BarPayload 的处理方式（见上方注释）
+        public string  Exchange        { get; set; } = "";
+        public string  MarketType      { get; set; } = "";
+        public double  Price           { get; set; }
+        public double  Volume          { get; set; }
+        public double  VolumeUsd       { get; set; }
+        public string  Direction       { get; set; } = "";
+        public string  ThresholdLevel  { get; set; } = "";
+        public bool    IsUpdate        { get; set; }
+        public bool    NearPoc         { get; set; }
+        public double? PocPrice        { get; set; }
+        public double? DistFromPocPct  { get; set; }
+        public double  CurrentBarDelta { get; set; }
+        public double  CurrentCvd      { get; set; }
+        // v5.1 新增：累计过程诊断字段，帮助判断大单数值是否合理
+        public double  FirstSeenVolume { get; set; }
+        public double  GrowthSeconds   { get; set; }
+        public int     UpdateCount     { get; set; }
+        public string  Source          { get; set; } = "AtasBridge/5.1";
+    }
+
+    // Phase 7F: native absorption push payload. Field names serialize to
+    // snake_case via _serOpts (same as BarPayload/TradePayload), matching
+    // the /atas/absorption schema on the VPS side.
+    public sealed class AbsorptionPayload
+    {
+        public string Timestamp   { get; set; } = "";
+        public string Exchange    { get; set; } = "";
+        public string MarketType  { get; set; } = "";
+        public string Instrument  { get; set; } = "BTCUSDT";
+        public string Side        { get; set; } = "";
+        public double Price       { get; set; }
+        public double AbsorbedBtc { get; set; }
+        public double BidVol      { get; set; }
+        public double AskVol      { get; set; }
+        public double Ratio       { get; set; }
+        public string Source      { get; set; } = "AtasBridge/5.1";
+    }
+}

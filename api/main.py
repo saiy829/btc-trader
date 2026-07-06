@@ -1073,6 +1073,12 @@ def _atas_db_init():
 _atas_cooldown: dict = {}
 _ATAS_COOLDOWN_SEC = 60   # 同类信号60秒内不重复发Telegram
 
+# ─── ATAS 吸收信号冷却（Phase 7F，内存，重启清零）──────────────────
+# 按 (exchange, market_type, side) 三元组冷却：现有 Absorption 走旧通道时
+# 7天356条(≈每天51条)太吵，新通道给更长冷却
+_atas_absorb_cooldown: dict = {}
+_ATAS_ABSORB_COOLDOWN_SEC = 600   # 同一路同方向10分钟内不重复发Telegram
+
 
 def _parse_atas_messages(messages: list) -> list:
     """解析 ATAS Webhook messages 数组
@@ -1503,3 +1509,117 @@ async def atas_bar(request: Request):
 
     log.info(f"[ATAS] bar [{exchange}/{market}] {data.get('timestamp')} delta={data.get('delta')} poc={data.get('poc_price')}")
     return {"status": "ok"}
+
+
+# ══════════════════════════════════════════════════════════════════
+#  ATAS Bridge — Phase 7F：AtasBridge.dll 原生吸收检测（取代原
+#  Absorption 走 /atas/signal 那条 ATAS 内置 Webhook——那条通道原理上
+#  不带价格/数量，DLL 端在 footprint 数据流上直接算好吸收量再推送这里。
+#  Bug#19 铁律：ATAS 端点块只增不删，本节新增 /atas/absorption，
+#  不改动 /atas/signal、/atas/trade、/atas/bar 已有逻辑。
+# ══════════════════════════════════════════════════════════════════
+
+def _fmt_wan_yi(usd: float) -> str:
+    """USD 金额转中文万/亿格式（吸收信号消息用）"""
+    if usd >= 100_000_000:
+        return f"{usd/100_000_000:.2f}亿美元"
+    if usd >= 10_000:
+        return f"{usd/10_000:.0f}万美元"
+    return f"{usd:.0f}美元"
+
+
+@app.post("/atas/absorption")
+async def atas_absorption(request: Request, background_tasks: BackgroundTasks):
+    """
+    接收 AtasBridge.dll 原生吸收检测推送（v5.1+）。
+    OKX 永续的张->BTC换算已经在 DLL 端完成，这里收到的 absorbed_btc/
+    bid_vol/ask_vol 都已经是统一的 BTC 口径，不需要再处理。
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        return {"status": "error", "detail": "invalid json"}
+
+    exchange, market = _atas_resolve_market(data)
+    side         = data.get("side", "")
+    price        = float(data.get("price", 0))
+    absorbed_btc = float(data.get("absorbed_btc", 0))
+    bid_vol      = float(data.get("bid_vol", 0))
+    ask_vol      = float(data.get("ask_vol", 0))
+    ratio        = float(data.get("ratio", 0))
+    instrument   = data.get("instrument", "BTCUSDT")
+    ts           = data.get("timestamp") or datetime.now(SGT).isoformat()
+
+    # ── 写库（复用 atas_signals 表，不新建表）───────────────────────
+    try:
+        conn = sqlite3.connect(_ATAS_DB, timeout=5)
+        conn.execute(
+            'INSERT INTO atas_signals '
+            '(timestamp, indicator_name, signal_type, price, raw_payload, '
+            ' exchange, market_type, raw_instrument, created_at) '
+            'VALUES (?,?,?,?,?,?,?,?,?)',
+            (ts, "Absorption", side, price,
+             json.dumps(data, ensure_ascii=False),
+             exchange, market, instrument,
+             datetime.now(SGT).strftime("%Y-%m-%d %H:%M:%S"))
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log.warning(f"[ATAS] absorption 写库失败: {e}")
+        return {"status": "error", "detail": str(e)}
+
+    log.info(
+        f"[ATAS] absorption [{exchange}/{market}] {side} @ {price:,.0f} "
+        f"{absorbed_btc:.1f}BTC bid={bid_vol:.1f} ask={ask_vol:.1f} ratio={ratio:.1f}"
+    )
+
+    # ── 冷却：按 (exchange, market_type, side) 三元组，冷却期内仍写库，
+    #    只是不发 TG ─────────────────────────────────────────────────
+    key     = (exchange, market, side)
+    now_ts  = datetime.now(SGT).timestamp()
+    last_ts = _atas_absorb_cooldown.get(key, 0)
+    if now_ts - last_ts < _ATAS_ABSORB_COOLDOWN_SEC:
+        remain = int(_ATAS_ABSORB_COOLDOWN_SEC - (now_ts - last_ts))
+        log.info(f"[ATAS] absorption {key} 冷却中 剩余{remain}s")
+        return {"status": "ok", "telegram": f"cooldown_{remain}s"}
+
+    _atas_absorb_cooldown[key] = now_ts
+    background_tasks.add_task(
+        _send_absorption_alert, exchange, market, instrument, side,
+        price, absorbed_btc, bid_vol, ask_vol, ratio, ts
+    )
+
+    return {"status": "ok"}
+
+
+async def _send_absorption_alert(exchange, market, instrument, side, price,
+                                   absorbed_btc, bid_vol, ask_vol, ratio, ts):
+    try:
+        from alert_bot.send import async_send
+
+        market_label = (f"{_ATAS_EXCHANGE_CN.get(exchange, exchange)}{instrument}"
+                         f"{_ATAS_MARKET_CN.get(market, market)}")
+
+        if side == "bid_absorb":
+            dir_label = "买盘吸收（下方出现承接，潜在支撑）"
+        elif side == "ask_absorb":
+            dir_label = "卖盘吸收（上方出现压制，潜在阻力）"
+        else:
+            dir_label = side or "未知方向"
+
+        usd_str  = _fmt_wan_yi(absorbed_btc * price)
+        time_str = ts.split("T")[-1][:8] if "T" in ts else ts
+
+        msg = (
+            f"🧲 吸收信号 | {market_label}\n"
+            f"方向：{dir_label}\n"
+            f"价格：${price:,.0f}\n"
+            f"吸收量：{absorbed_btc:.1f} BTC（约 {usd_str}）\n"
+            f"买卖量比：{ratio:.1f} : 1\n"
+            f"时间：{time_str}（北京）"
+        )
+        await async_send(msg)
+        log.info(f"[ATAS] absorption Telegram已推送: {exchange}/{market} {side}")
+    except Exception as e:
+        log.warning(f"[ATAS] absorption tg error: {e}")

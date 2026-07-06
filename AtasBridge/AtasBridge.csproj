@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <AssemblyName>AtasBridge</AssemblyName>
+    <RootNamespace>AtasBridge</RootNamespace>
+    <Optimize>true</Optimize>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="ATAS.Indicators">
+      <HintPath>D:\Program Files\ATAS X\ATAS.Indicators.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- 编译后自动复制 DLL 到 ATAS X 指标目录 -->
+  <Target Name="CopyToATAS" AfterTargets="Build">
+    <Copy
+      SourceFiles="$(TargetPath)"
+      DestinationFolder="$(APPDATA)\ATAS X\Indicators\"
+      OverwriteReadOnlyFiles="true"
+      SkipUnchangedFiles="false" />
+    <Message Text="AtasBridge.dll -> ATAS X\Indicators\" Importance="high" />
+  </Target>
+</Project>
