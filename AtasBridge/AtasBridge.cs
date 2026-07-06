@@ -415,16 +415,33 @@ namespace AtasBridge
         // Labels/DrawingText (bar+price anchored, scrolls off-screen with the
         // chart), this stays pinned to the corner regardless of scroll/zoom.
         private static readonly RenderFont _identityRenderFont = new RenderFont("Arial", 13f);
+        private bool _onRenderLogged = false;
 
         protected override void OnRender(RenderContext context, DrawingLayouts layout)
         {
             base.OnRender(context, layout);
 
             if (!ShowIdentityLabel) return;
-            // Final is the top HUD-style layer, drawn every frame independent
-            // of the historical/latest-bar chart caching passes - the same
-            // layer a fixed corner overlay like Watermark needs.
-            if (layout != DrawingLayouts.Final) return;
+
+            // One-time diagnostic: confirm OnRender is actually being invoked
+            // by ATAS at all, and what layout flag value(s) it passes - two
+            // earlier Stage1 builds had the label silently never appear
+            // (EnableCustomDrawing was missing, then a DrawingLayouts.Final
+            // exact-equality check that may never have matched), so this
+            // removes the guesswork for next time if it still doesn't show.
+            if (!_onRenderLogged)
+            {
+                _onRenderLogged = true;
+                try { LoggerHelper.LogInfo(this, "{0}", new object[] { $"AtasBridge OnRender fired, layout={layout} ({(int)layout})" }); } catch { }
+            }
+            // Phase 7H Stage1 troubleshooting: deliberately NOT filtering by
+            // DrawingLayouts here. DrawingLayouts is a [Flags] enum (None=1,
+            // Historical=2, LatestBar=4, Final=8) and after two failed
+            // attempts to guess which layout value(s) ATAS actually passes
+            // for this indicator, drawing unconditionally on every OnRender
+            // call is the reliable option - it is a single line of text, so
+            // even if this fires multiple times per frame the redraws just
+            // overlap at the same pixel position with no visible difference.
 
             try
             {
