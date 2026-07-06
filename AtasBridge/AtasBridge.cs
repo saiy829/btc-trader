@@ -12,8 +12,9 @@ using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 using System.Drawing;
 using ATAS.Indicators;
-using ATAS.Indicators.Drawing;
 using Utils.Common.Logging;
+using OFT.Rendering.Context;
+using OFT.Rendering.Tools;
 
 namespace AtasBridge
 {
@@ -389,35 +390,47 @@ namespace AtasBridge
 
         private void UpdateIdentityRecon(int bar)
         {
-            try
-            {
-                int labelBar = (FirstVisibleBarNumber >= 0 && FirstVisibleBarNumber <= CurrentBar)
-                    ? FirstVisibleBarNumber : bar;
-                var candle = GetCandle(labelBar);
-                if (candle is null) return;
-
-                Labels["AtasBridgeIdentityRecon"] = new DrawingText(TickSize)
-                {
-                    Text         = BuildIdentityShort(),
-                    Bar          = labelBar,
-                    TextPrice    = candle.High,
-                    IsAbovePrice = true,
-                    YOffset      = 20,
-                    Textcolor    = Color.Yellow,
-                    FillColor    = Color.FromArgb(190, 0, 0, 0),
-                    Outlinecolor = Color.Yellow,
-                    FontSize     = 13f,
-                    AutoSize     = true,
-                    Tag          = "AtasBridgeIdentityRecon"
-                };
-            }
-            catch { }
-
+            // On-chart display is handled by OnRender (screen-anchored corner
+            // overlay - see below). This method only owns the capped log dump,
+            // triggered from OnCalculate on the normal bar-close cadence.
             if (_identityLogCount < IDENTITY_LOG_MAX)
             {
                 _identityLogCount++;
                 try { LoggerHelper.LogInfo(this, "{0}", new object[] { BuildIdentityDump() }); } catch { }
             }
+        }
+
+        // Fixed screen-space overlay in the chart's top-left corner, same
+        // technique as ATAS's own built-in "Watermark" indicator (confirmed
+        // via reflection: ATAS.Indicators.Technical.Watermark overrides this
+        // same OnRender(RenderContext, DrawingLayouts) method declared on
+        // ExtendedIndicator, which Indicator itself extends). Unlike
+        // Labels/DrawingText (bar+price anchored, scrolls off-screen with the
+        // chart), this stays pinned to the corner regardless of scroll/zoom.
+        private static readonly RenderFont _identityRenderFont = new RenderFont("Arial", 13f);
+
+        protected override void OnRender(RenderContext context, DrawingLayouts layout)
+        {
+            base.OnRender(context, layout);
+
+            if (!ShowIdentityLabel) return;
+            // Final is the top HUD-style layer, drawn every frame independent
+            // of the historical/latest-bar chart caching passes - the same
+            // layer a fixed corner overlay like Watermark needs.
+            if (layout != DrawingLayouts.Final) return;
+
+            try
+            {
+                string text = BuildIdentityShort();
+                var size = context.MeasureString(text, _identityRenderFont);
+                const int x = 8, y = 8, pad = 4;
+
+                context.FillRectangle(
+                    Color.FromArgb(190, 0, 0, 0),
+                    new Rectangle(x - pad, y - pad, size.Width + pad * 2, size.Height + pad * 2));
+                context.DrawString(text, _identityRenderFont, Color.Yellow, x, y);
+            }
+            catch { }
         }
 
         // Compact single-line summary for the on-chart corner label.

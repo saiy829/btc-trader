@@ -20,6 +20,10 @@
       <HintPath>D:\Program Files\ATAS X\Utils.Common.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="OFT.Rendering">
+      <HintPath>D:\Program Files\ATAS X\OFT.Rendering.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
   <!-- 编译后自动复制 DLL 到 ATAS X 指标目录 -->

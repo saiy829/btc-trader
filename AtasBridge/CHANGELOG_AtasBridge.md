@@ -64,9 +64,17 @@
     `NextFundingTime` / `Expiration` / `Id` / `SecurityId`
   - 每个字段读取都单独 try/catch，某个属性在当前 ATAS 版本/连接状态下不可用
     时只记录 `<error>`，不影响其余字段和整个指标运行
-- 图表左上角绘制角标（`Labels["AtasBridgeIdentityRecon"]`，锚定在当前可见
-  最左侧K线的最高价上方，`AddText`/`DrawingText` API），格式：
+- 图表左上角绘制角标，格式：
   `RAW: {instrument} | {exchange} | type={SecType} | conn={ConnectorId} | inverse={IsInverseFutures}`
+  - **首版实现有误，已修正**：最初用 `Labels["..."] = new DrawingText(...)`
+    锚定在"当前可见最左侧K线最高价上方"，这是K线/价格锚定，图表一滚动
+    或缩放角标就跟着跑掉，Sea 实测反馈"只有移动K线瞬间截图才能看到"。
+    改为 override `OnRender(RenderContext, DrawingLayouts)`——通过反射确认
+    这正是 ATAS 内置 `Watermark` 指标（`ATAS.Indicators.Technical.Watermark`）
+    本身固定角标的实现方式，该方法定义在 `ExtendedIndicator`（`Indicator`
+    的基类），`AtasBridge : Indicator` 天然继承得到，不需要改基类。只在
+    `DrawingLayouts.Final`（每帧绘制的HUD层）用 `RenderContext.DrawString`
+    在固定像素坐标(8,8)绘制，与K线滚动/缩放完全无关
 - 同时通过 `Utils.Common.Logging.LoggerHelper.LogInfo` 写入 ATAS 日志（完整
   多行字段列表），每个指标实例最多记录3次（应对 `TradingManager.Security`
   在指标刚挂载时可能还未就绪、需要等一两根K线才能取到值的情况），之后不再
