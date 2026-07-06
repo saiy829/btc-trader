@@ -1623,3 +1623,26 @@ async def _send_absorption_alert(exchange, market, instrument, side, price,
         log.info(f"[ATAS] absorption Telegram已推送: {exchange}/{market} {side}")
     except Exception as e:
         log.warning(f"[ATAS] absorption tg error: {e}")
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Phase 7G：信号引擎只读端点（为后续 7H 图表显示预埋）
+#  monitor/signal_engine.py 是独立常驻服务，自己直接写 engine_signals 表，
+#  这里只加一个只读查询接口，不涉及任何写操作，不影响其余端点。
+# ══════════════════════════════════════════════════════════════════
+
+@app.get("/api/signal/latest")
+async def signal_latest():
+    """返回 engine_signals 表最新一条记录（全字段），无记录返回 {"status":"empty"}"""
+    try:
+        conn = sqlite3.connect(_ATAS_DB, timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM engine_signals ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        if not row:
+            return {"status": "empty"}
+        return dict(row)
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
