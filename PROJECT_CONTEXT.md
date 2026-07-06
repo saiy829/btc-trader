@@ -621,6 +621,7 @@ tail -20 /opt/btc-trader/logs/git_sync.log
 | 2026-07-06 | Phase 7E：morning_monday 增加 TradFi 周初开盘窗口提示（全球外汇+CME Globex股指期货开盘，北京时间夏令时05:00-07:00/冬令时06:00-08:00自动切换，_monday_open_window()按美东dst()判断），提示常见BSL/SSL集中清扫 |
 | 2026-07-06 | 7E v2：structure_monitor 新增周一插针TG预警（扫PDH/PDL又收回，独立协程monday_sweep_loop与现有monitor_loop并行）；方法论文档同步补充窗口说明 |
 | 2026-07-06 | 7F：新增 _monday_window_stats() 用Binance 5m K线代码计算周一开盘窗口实测数据（开高低收/涨跌幅/振幅/PDH-PDL清扫判定），修复7E点评幻觉（AI未获窗口K线时编造走势） |
+| 2026-07-06 | 订正文档笔误：OKX面值系数 0.001→0.01（代码本来就是0.01，monitor/liquidation_monitor.py从未错），错误公式实际写在 PROJECT_CONTEXT-v1.md 历史Bug表里，已订正两处 |
 
 ---
 

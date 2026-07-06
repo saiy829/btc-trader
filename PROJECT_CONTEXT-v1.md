@@ -111,7 +111,7 @@ scp -P 2** 本地文件 root@*.*.*.*:/opt/btc-trader/目标路径
 │
 ├── monitor/
 │   ├── liquidation_monitor.py  OKX WebSocket爆仓（主力实时清算源）
-│   │                           坑：sz*0.001*price 才是真实USD金额
+│   │                           坑：sz*0.01*price 才是真实USD金额
 │   ├── funding_monitor.py    资金费率极端值预警
 │   ├── oi_monitor.py         OI突变预警
 │   ├── dom_monitor.py        大单挂单监控（Bybit订单簿）
@@ -313,7 +313,7 @@ redis==8.0.0             Redis（备用）
 
 | Bug | 原因 | 修复 |
 |-----|------|------|
-| OKX爆仓金额100×虚高 | sz字段是张数不是BTC | sz×0.001×price |
+| OKX爆仓金额100×虚高 | sz字段是张数不是BTC | sz×0.01×price |
 | Funding显示历史值 | 用了/fundingRate端点 | 改用/premiumIndex |
 | MP数据源错误 | 误用现货API | 改用/fapi/v1/klines |
 | ETF数据三倍重复 | 日/周/月三种累计 | 取同日期最小绝对值 |
