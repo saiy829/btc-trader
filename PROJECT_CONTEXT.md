@@ -661,6 +661,19 @@ tail -20 /opt/btc-trader/logs/git_sync.log
 | 2026-07-06 | Phase 7H 阶段1（侦察）：AtasBridge.dll v2026.07.06-1新增身份侦察模式(ShowIdentityLabel)，图表角标+日志摊开显示InstrumentInfo/TradingManager.Security全部原始身份字段，只加不改，交付后等Sea四张图截图确认真实取值再做阶段2自动解析(7F教训：不凭API文档假设解析规则) |
 | 2026-07-06 | Phase 7H 阶段2（正式）：AtasBridge.dll v2026.07.06-2，基于四图真实截图确认的规则——仅用InstrumentInfo.Exchange精确匹配(Binance/BinanceFutures/OkxSpot/OkxPerpFutures四值，OKX两图TradingManager.Security恒为null不可用)，新增IdentityMode(Auto默认/Manual)，OKX×0.01换算与三个推送方法的exchange/market_type字段统一改用ResolveEffectiveIdentity()最终生效身份，Auto解析失败等同Unset(不猜测)，Auto与手动下拉框冲突时角标变黄但数据仍按Auto值；角标从阶段1原始字段摊开改为运营状态显示(AUTO/MANUAL+推送✓/✗+时间) |
 
+### 路线图（7系列，本表未覆盖的更早阶段详见上表）
+- [x] 7A / 7A-2 / 7A-3：简报综合信号分代码化 + 14档三因子映射 + Markdown清洗
+- [x] 7B：Telegram /pos 仓位风控计算命令
+- [x] 7E / 7E v2：周一 TradFi 周初开盘窗口提示 + 插针TG预警
+- [x] 7F：AtasBridge 原生吸收检测 + 全字段 Telegram 推送
+- [x] 7G：VPS 常驻信号引擎（阈值触发 + 模拟信号登记 + 结果自跟踪）
+- [x] 7H：图表身份自动识别（阶段1侦察 + 阶段2正式）+ atas_bars 去重与订正
+- [ ] 7I（已登记，未开始）：DLL 信号显示层——AtasBridge 轮询
+  `GET /api/signal/latest`，将引擎信号（方向/入场/止损/目标1/目标2）以
+  价格线+标签绘制在图表上，终态信号自动清除；同卡顺带：角标位置改为
+  可设置（默认左下角）、角标状态字符改用纯ASCII（当前用了 ✓/✗/≠ 等
+  非ASCII符号）
+
 ---
 
 ## 十九、注意事项与已知问题
