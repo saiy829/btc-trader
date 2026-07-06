@@ -138,7 +138,14 @@ namespace AtasBridge
             public int      UpdateCount;
         }
 
-        public AtasBridge() : base(true) { DenyToChangePanel = true; }
+        // Phase 7H Stage1: EnableCustomDrawing defaults to false on a plain
+        // Indicator (confirmed via reflection - ATAS.Indicators.Technical's
+        // built-in Watermark explicitly sets it true in its own constructor).
+        // Without this, ATAS never invokes OnRender at all, so the identity
+        // corner label silently never appears - this was the actual bug
+        // behind Sea's "no label visible after redeploy" report, not the
+        // OnRender/DrawingLayouts logic itself.
+        public AtasBridge() : base(true) { DenyToChangePanel = true; EnableCustomDrawing = true; }
 
         // ── OKX 永续合约"张→BTC"换算 ─────────────────────────────────────
         // OKX 永续合约(SWAP)成交量单位是"张"(contract)，1张=0.01 BTC（OKX官方

@@ -75,6 +75,12 @@
     的基类），`AtasBridge : Indicator` 天然继承得到，不需要改基类。只在
     `DrawingLayouts.Final`（每帧绘制的HUD层）用 `RenderContext.DrawString`
     在固定像素坐标(8,8)绘制，与K线滚动/缩放完全无关
+  - **第二次修正**：换成 `OnRender` 后 Sea 换上新DLL仍完全看不到角标。
+    反射对比发现：普通 `Indicator` 的 `EnableCustomDrawing` 默认是
+    `false`，而 ATAS 内置 `Watermark` 在自己的构造函数里显式设成
+    `true`——这个属性不开，ATAS 根本不会调用 `OnRender`，角标代码本身
+    没问题但从来没被执行过。修复：构造函数里加一行
+    `EnableCustomDrawing = true;`
 - 同时通过 `Utils.Common.Logging.LoggerHelper.LogInfo` 写入 ATAS 日志（完整
   多行字段列表），每个指标实例最多记录3次（应对 `TradingManager.Security`
   在指标刚挂载时可能还未就绪、需要等一两根K线才能取到值的情况），之后不再
