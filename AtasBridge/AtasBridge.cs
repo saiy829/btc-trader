@@ -60,8 +60,8 @@ namespace AtasBridge
     // label / read-only Version setting, so they cannot drift out of sync.
     internal static class AtasBridgeVersion
     {
-        public const string Tag  = "v2026.07.11-2";
-        public const string Desc = "Chinese Settings UI + Data Push Master Switch";
+        public const string Tag  = "v2026.07.11-3";
+        public const string Desc = "Hide Unused Default DataSeries";
     }
 
     [DisplayName("AtasBridge")]
@@ -296,7 +296,23 @@ namespace AtasBridge
         // corner label silently never appears - this was the actual bug
         // behind Sea's "no label visible after redeploy" report, not the
         // OnRender/DrawingLayouts logic itself.
-        public AtasBridge() : base(true) { DenyToChangePanel = true; EnableCustomDrawing = true; }
+        public AtasBridge() : base(true)
+        {
+            DenyToChangePanel = true;
+            EnableCustomDrawing = true;
+
+            // Phase 7K: the base Indicator class auto-creates one default
+            // output DataSeries (confirmed via reflection: a bare Indicator
+            // subclass with zero custom code already has DataSeries.Count==1)
+            // - this is generic SDK boilerplate most simple line/oscillator
+            // indicators plot through, not something AtasBridge ever writes
+            // to (it's a data-bridge + drawing tool, not a per-bar value
+            // series). Left visible it shows up as a confusing "绘图" section
+            // in the settings panel that never draws anything - Sea asked
+            // what it does. Hiding it removes the confusion; harmless since
+            // nothing in this file ever reads or writes DataSeries[0].
+            try { DataSeries[0].IsHidden = true; } catch { }
+        }
 
         // Phase 7I: remove any signal drawing objects (price lines + labels)
         // this instance added, so unloading/replacing the indicator does not
