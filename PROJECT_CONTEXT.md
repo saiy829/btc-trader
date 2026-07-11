@@ -716,3 +716,5 @@ tail -20 /opt/btc-trader/logs/git_sync.log
 5. 以 VPS 实际状态为准进行修改
 6. 生成新文件 → 用户 scp 上传 → supervisorctl restart → 验证
 ```
+
+| 2026-07-11 | 7J：新增 scripts/gen-index.sh，自动生成 PROJECT_INDEX.md（文件树/API路由/环境变量名/Supervisor状态）；CLAUDE.md 增加会话开始必读索引规则 |
