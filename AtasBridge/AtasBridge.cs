@@ -60,8 +60,8 @@ namespace AtasBridge
     // label / read-only Version setting, so they cannot drift out of sync.
     internal static class AtasBridgeVersion
     {
-        public const string Tag  = "v2026.07.11-1";
-        public const string Desc = "Signal History Chart Markers";
+        public const string Tag  = "v2026.07.11-2";
+        public const string Desc = "Chinese Settings UI + Data Push Master Switch";
     }
 
     [DisplayName("AtasBridge")]
@@ -72,24 +72,31 @@ namespace AtasBridge
         // in use is visible from the indicator's own settings without
         // needing to check the "About" tab or file properties externally.
         // Not wired into any logic - purely informational.
-        [Display(Name = "Version", GroupName = "1. Config", Order = 0)]
+        // Phase 7K: settings panel labels translated to Chinese per Sea's
+        // request. Only Display(Name=)/GroupName= (native ATAS settings UI
+        // text, rendered through ATAS's own WPF/Avalonia UI - already shown
+        // to render Chinese fine, e.g. the panel's own "关于"/"设置" labels)
+        // - NOT enum member values (Binance/Okx/Auto/Manual/etc, which are
+        // read back via ToString() for JSON payloads and internal logic, so
+        // renaming those would break functionality, not just cosmetics).
+        [Display(Name = "版本号", GroupName = "1. 基础配置", Order = 0)]
         [System.ComponentModel.ReadOnly(true)]
         public string VersionInfo { get; set; } = AtasBridgeVersion.Tag + " (" + AtasBridgeVersion.Desc + ")";
 
-        [Display(Name = "VPS URL", GroupName = "1. Config", Order = 1)]
+        [Display(Name = "VPS 地址", GroupName = "1. 基础配置", Order = 1)]
         public string VpsUrl { get; set; } = "https://mb.661688.xyz";
 
-        [Display(Name = "Auth Token", GroupName = "1. Config", Order = 2)]
+        [Display(Name = "认证令牌", GroupName = "1. 基础配置", Order = 2)]
         public string AuthToken { get; set; } = "";
 
-        [Display(Name = "Timeframe Label", GroupName = "1. Config", Order = 3)]
+        [Display(Name = "时间周期标签", GroupName = "1. 基础配置", Order = 3)]
         public string Timeframe { get; set; } = "5m";
 
         // ── v5.0 新增：这张图表的身份标签（默认Unset，必须手动选一次）────
-        [Display(Name = "Exchange", GroupName = "1. Config", Order = 4)]
+        [Display(Name = "交易所", GroupName = "1. 基础配置", Order = 4)]
         public ExchangeName Exchange { get; set; } = ExchangeName.Unset;
 
-        [Display(Name = "Market Type", GroupName = "1. Config", Order = 5)]
+        [Display(Name = "市场类型", GroupName = "1. 基础配置", Order = 5)]
         public MarketKind MarketType { get; set; } = MarketKind.Unset;
 
         // Phase 7H Stage2: Auto (default) parses exchange/market_type from
@@ -100,42 +107,52 @@ namespace AtasBridge
         // actual data (push payloads + the OKX x0.01 conversion trigger)
         // regardless of what the dropdowns say - Manual exists purely as a
         // fallback channel for instruments Auto cannot recognize.
-        [Display(Name = "Identity Mode", GroupName = "1. Config", Order = 6)]
+        [Display(Name = "身份识别模式", GroupName = "1. 基础配置", Order = 6)]
         public IdentityMode IdentityModeSetting { get; set; } = IdentityMode.Auto;
 
-        [Display(Name = "Enable Bar Push", GroupName = "2. Switch", Order = 1)]
+        // Phase 7K: master switch. Sea runs this indicator on both ATAS X and
+        // the regular ATAS Platform (see the dual-build core convention) but
+        // only wants ONE of them actually pushing data to the VPS - turning
+        // this off on the non-pushing platform's charts disables ALL pushes
+        // (bar/trade/absorption) in one click instead of three, while leaving
+        // the identity label + engine signal display fully working (neither
+        // depends on push settings at all).
+        [Display(Name = "总开关：启用数据推送", GroupName = "2. 推送开关", Order = 0)]
+        public bool EnableDataPush { get; set; } = true;
+
+        [Display(Name = "启用K线推送", GroupName = "2. 推送开关", Order = 1)]
         public bool EnableBarPush { get; set; } = true;
 
-        [Display(Name = "Enable Trade Push", GroupName = "2. Switch", Order = 2)]
+        [Display(Name = "启用大单推送", GroupName = "2. 推送开关", Order = 2)]
         public bool EnableTradePush { get; set; } = true;
 
-        [Display(Name = "Enable Footprint", GroupName = "2. Switch", Order = 3)]
+        [Display(Name = "启用足迹图数据", GroupName = "2. 推送开关", Order = 3)]
         public bool EnableFootprint { get; set; } = true;
 
         // Phase 7F: native absorption detection, replaces the old ATAS built-in
         // Absorption webhook (/atas/signal) which cannot carry price/volume.
-        [Display(Name = "Enable Absorption Push", GroupName = "2. Switch", Order = 4)]
+        [Display(Name = "启用吸收信号推送", GroupName = "2. 推送开关", Order = 4)]
         public bool EnableAbsorptionPush { get; set; } = true;
 
-        [Display(Name = "Medium BTC (db only)", GroupName = "3. Thresholds", Order = 1)]
+        [Display(Name = "中单阈值(仅入库) BTC", GroupName = "3. 大单阈值", Order = 1)]
         public decimal ThresholdMedium { get; set; } = 20m;
 
-        [Display(Name = "Large BTC (db+TG)", GroupName = "3. Thresholds", Order = 2)]
+        [Display(Name = "大单阈值(入库+TG) BTC", GroupName = "3. 大单阈值", Order = 2)]
         public decimal ThresholdLarge { get; set; } = 100m;
 
-        [Display(Name = "Whale BTC (urgent TG)", GroupName = "3. Thresholds", Order = 3)]
+        [Display(Name = "鲸鱼单阈值(紧急TG) BTC", GroupName = "3. 大单阈值", Order = 3)]
         public decimal ThresholdWhale { get; set; } = 300m;
 
-        [Display(Name = "Min level volume BTC", GroupName = "3. Thresholds", Order = 4)]
+        [Display(Name = "最小价位量 BTC", GroupName = "3. 大单阈值", Order = 4)]
         public decimal FpMinVolume { get; set; } = 3m;
 
         // Phase 7F: absorption thresholds. Dominant side volume (BTC, already
         // converted for OKX perp) must reach AbsorbMinBtc AND be at least
         // AbsorbRatio times the opposite side to count as absorption.
-        [Display(Name = "Absorb Min BTC", GroupName = "4. Absorption", Order = 1)]
+        [Display(Name = "吸收最小量 BTC", GroupName = "4. 吸收检测", Order = 1)]
         public decimal AbsorbMinBtc { get; set; } = 15.0m;
 
-        [Display(Name = "Absorb Ratio", GroupName = "4. Absorption", Order = 2)]
+        [Display(Name = "吸收比例", GroupName = "4. 吸收检测", Order = 2)]
         public decimal AbsorbRatio { get; set; } = 3.0m;
 
         // Phase 7H Stage1 (recon) -> Stage2 (formal): master on/off switch for
@@ -144,12 +161,12 @@ namespace AtasBridge
         // never guess parsing rules from API docs alone); Stage2 replaced the
         // on-chart content with the operational Auto/Manual status label
         // (see ComputeIdentityLabel) now that the parsing rule is confirmed.
-        [Display(Name = "Show Identity Label", GroupName = "5. Identity Recon", Order = 1)]
+        [Display(Name = "显示身份角标", GroupName = "5. 身份角标", Order = 1)]
         public bool ShowIdentityLabel { get; set; } = true;
 
         // Phase 7I: label position is now configurable, default BottomLeft
         // (previously hardcoded top-left at pixel 8,8).
-        [Display(Name = "Label Position", GroupName = "5. Identity Recon", Order = 2)]
+        [Display(Name = "角标位置", GroupName = "5. 身份角标", Order = 2)]
         public LabelPosition LabelPositionSetting { get; set; } = LabelPosition.BottomLeft;
 
         // Phase 7I hotfix: Sea reported BottomLeft rendered almost entirely
@@ -158,22 +175,24 @@ namespace AtasBridge
         // area, and an 8px margin was not enough clearance). Rather than
         // guess a "correct" margin for every theme/DPI, expose manual pixel
         // offsets so Sea can nudge the label to a visible spot themselves.
-        [Display(Name = "Label Offset X", GroupName = "5. Identity Recon", Order = 3)]
+        [Display(Name = "角标水平偏移", GroupName = "5. 身份角标", Order = 3)]
         public int LabelOffsetX { get; set; } = 0;
 
-        [Display(Name = "Label Offset Y", GroupName = "5. Identity Recon", Order = 4)]
+        [Display(Name = "角标垂直偏移", GroupName = "5. 身份角标", Order = 4)]
         public int LabelOffsetY { get; set; } = 0;
 
-        // Phase 7I: polls the VPS's existing GET /api/signal/latest (7G
-        // pre-wired this read-only endpoint; zero server-side changes here)
-        // and draws the current open engine_signals row (entry/stop/t1/t2)
-        // as price lines. Only runs on the Binance|Perp chart - the engine's
-        // score is computed on Binance perpetual data, so drawing it on the
-        // other three charts would be misleading.
-        [Display(Name = "Show Engine Signals", GroupName = "6. Engine Signals", Order = 1)]
+        // Phase 7I/7J: polls the VPS's GET /api/signal/history and draws the
+        // current open engine_signals row (entry/stop/t1/t2) as price lines
+        // plus recent terminal signals as historical markers. Only runs on
+        // the Binance|Perp chart - the engine's score is computed on Binance
+        // perpetual data, so drawing it on the other three charts would be
+        // misleading. Not gated by EnableDataPush above - this is read-only
+        // polling, not pushing, and Sea explicitly wants it to keep working
+        // on the platform where data push is turned off.
+        [Display(Name = "显示引擎信号", GroupName = "6. 引擎信号", Order = 1)]
         public bool ShowEngineSignals { get; set; } = true;
 
-        [Display(Name = "Signal Poll Seconds", GroupName = "6. Engine Signals", Order = 2)]
+        [Display(Name = "信号轮询间隔(秒)", GroupName = "6. 引擎信号", Order = 2)]
         public int SignalPollSeconds { get; set; } = 10;
 
         private static readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(10) };
@@ -395,7 +414,7 @@ namespace AtasBridge
             // Phase 7F: must run before the "bar <= _lastBar" early return below,
             // because absorption needs to be checked on every tick of the
             // still-forming current bar, not just once when a bar closes.
-            if (EnableAbsorptionPush) CheckAbsorption(bar);
+            if (EnableDataPush && EnableAbsorptionPush) CheckAbsorption(bar);
 
             if (bar <= _lastBar) return;
             if (bar == 0) { _lastBar = 0; return; }
@@ -429,7 +448,7 @@ namespace AtasBridge
             _pocPrice = candle.MaxVolumePriceInfo?.Price;
             _barDelta = candle.Delta * VolumeUnitMultiplier;
 
-            if (EnableBarPush) _ = PostBarAsync(candle);
+            if (EnableDataPush && EnableBarPush) _ = PostBarAsync(candle);
             _lastBar = bar;
         }
 
@@ -1193,13 +1212,13 @@ namespace AtasBridge
 
         protected override void OnCumulativeTrade(CumulativeTrade trade)
         {
-            if (!EnableTradePush) return;
+            if (!EnableDataPush || !EnableTradePush) return;
             CheckAndPost(trade, isUpdate: false);
         }
 
         protected override void OnUpdateCumulativeTrade(CumulativeTrade trade)
         {
-            if (!EnableTradePush) return;
+            if (!EnableDataPush || !EnableTradePush) return;
             CheckAndPost(trade, isUpdate: true);
         }
 

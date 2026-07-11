@@ -36,6 +36,17 @@
   仅用 `#if ATAS_PLATFORM` 分支处理差异点，编译后各自自动复制到对应
   指标目录。以后任何 AtasBridge.cs 改动，两个 csproj 都要重新编译验证，
   不能只更新其中一个平台。
+- **AtasBridge.dll "渲染字符串须纯ASCII"规则的适用范围（2026-07-11
+  Phase 7K 澄清）**：该规则源自7I的教训——自定义图表画布绘图
+  （`RenderContext.DrawString`画的✓/✗等符号）在Sea机器上渲染成方块，
+  这是ATAS底层绘图API的字体覆盖问题。适用范围是：图表画布绘图内容、
+  ATAS日志（`LoggerHelper.LogInfo`）、推送给VPS的JSON payload字符串
+  字段。**不适用于**设置面板的`[Display(Name=/GroupName=)]`文本——那
+  是ATAS原生WPF/Avalonia界面渲染，跟图表画布是完全不同的链路，面板
+  自身"关于"/"设置"这些原生文字本来就是中文，已证明这条链路对中文
+  渲染没有问题（7K已把全部设置项名称改成中文）。同理也不适用于枚举
+  值本身（`ExchangeName`/`MarketKind`等C#标识符，这些改中文会破坏
+  `.ToString()`回读逻辑，不是纯UI问题，原则上也不该改）。
 
 ### Claude 读取 GitHub 文件方法：
 ```bash
@@ -698,6 +709,7 @@ tail -20 /opt/btc-trader/logs/git_sync.log
 | 2026-07-06 | Bug#32（7I发现）：AtasBridge.dll只在ATAS X(Avalonia渲染,SDK v8.0.14.644)编译测试过，Sea导入普通版ATAS Platform(WPF渲染,SDK v8.0.14.290)时报ReflectionTypeLoadException缺Avalonia.Base；反射逐项核对两版本SDK发现核心API一致，仅LineTillTouch构造函数的Pen参数类型不同(ATAS X用UniversalPen/普通版用System.Drawing.Pen)，且普通版Platform目录自带的System.Drawing.Common.dll是过时的v8.0.0.0(它自己的ATAS.Indicators.dll实际要v10.0.0.0，需从.NET共享框架解析)；修复：新增AtasBridge.Platform.csproj共用同一份AtasBridge.cs，用#if ATAS_PLATFORM分支处理Pen差异，两个csproj各自编译产出双平台DLL
 | 2026-07-06 | 任务卡7I：DLL信号显示层+角标改进+双平台构建支持——AtasBridge.dll v2026.07.06-3~5，轮询GET /api/signal/latest(7G预埋,服务器零改动)仅在Binance|Perp图绘制entry/stop/t1/t2四条价格线(HorizontalLinesTillTouch)+图表上方ENGINE信号行，终态信号变灰30分钟后自动清除，轮询失败不清线；角标位置改可设置(LabelPosition+OffsetX/Y，默认左下)，状态字符从✓/✗/≠改纯ASCII(OK/ERR(n)/!=，此前非ASCII字符在Sea机器上渲染成方块)；新增AtasBridge.Platform.csproj支持普通版ATAS(Bug#32)，确立"每次升级须同时交付两平台构建"的核心约定
 | 2026-07-11 | 任务卡7J：面板信号展示+图表历史信号标记——新增只读端点GET /api/signal/history?days=7(main.py纯新增)；web/index.html新增信号展示区块(当前信号+近7天历史，独立REST轮询)；AtasBridge.dll v2026.07.11-1改用history端点轮询，当前信号仍完整四线，历史信号简化文字标记(entry价位+方向+结果，按时间戳二分查找K线定位)；发现并补记重要部署缺口：web/index.html实际部署在/www/wwwroot/mb.661688.xyz/(独立拷贝非软链接)，改仓库文件不会自动生效，需手动cp部署
+| 2026-07-11 | 任务卡7K：数据推送总开关+设置面板中文化——AtasBridge.dll v2026.07.11-2，新增EnableDataPush总开关(默认true，关闭后K线/大单/吸收三路推送全停，身份角标和引擎信号显示不受影响)，解决Sea在ATAS X和普通版ATAS两平台重复挂图但只想一边推数据的需求；设置面板24处Display(Name=/GroupName=)全部改中文(6个分组+各设置项)，枚举值本身保留英文(避免破坏ToString()回读逻辑)；澄清"渲染字符串须ASCII"规则适用范围仅限图表画布绘图+日志+JSON payload，不含原生设置面板文本
 
 ### 路线图（7系列，本表未覆盖的更早阶段详见上表）
 - [x] 7A / 7A-2 / 7A-3：简报综合信号分代码化 + 14档三因子映射 + Markdown清洗
@@ -713,6 +725,8 @@ tail -20 /opt/btc-trader/logs/git_sync.log
 - [x] 7J：面板信号展示（mb.661688.xyz新增信号卡片：当前信号+近7天历史）
   + 图表历史信号标记（AtasBridge.dll改轮询/api/signal/history，历史
   信号简化文字标记，7天窗口自动增删）+ 补记web/index.html独立部署位置
+- [x] 7K：AtasBridge.dll 数据推送总开关（EnableDataPush，双平台分工
+  推送 vs 展示）+ 设置面板中文化（24项Display标签，枚举值保留英文）
 
 ---
 
