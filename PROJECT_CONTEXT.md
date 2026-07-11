@@ -551,6 +551,11 @@ subprocess.run(['wp', 'post', 'create', ...])
 - 红线：本服务产出全部是【模拟·纸面交易】信号，不接任何下单接口
 - 只读查询：`GET /api/signal/latest` 返回 `engine_signals` 最新一条
   （为 Phase 7H 图表显示预埋，main.py 其余部分未改动）
+- 只读查询：`GET /api/signal/history?days=7`（2026-07-11 Phase 7J新增）
+  返回 `engine_signals` 最近N天全部记录，`{"count":N,"signals":[...]}`；
+  为面板信号展示区块 + AtasBridge 图表历史信号标记共用同一数据源，
+  `/api/signal/latest` 未废弃但 AtasBridge 已改用这个新端点（一次轮询
+  同时拿到当前信号+历史信号）
 
 ---
 
@@ -558,8 +563,27 @@ subprocess.run(['wp', 'post', 'create', ...])
 
 - **后端**：FastAPI v5，端口 8001，WebSocket 推送
 - **前端**：`web/index.html`，Vue3 + 深色/浅色主题
-- **数据**：价格、OI、Funding、CB溢价、CVD、清算列表、IB、VP
+- **数据**：价格、OI、Funding、CB溢价、CVD、清算列表、IB、VP、引擎信号
+  （当前信号+近7天历史，2026-07-11 Phase 7J新增，独立REST轮询
+  `/api/signal/history?days=7`，不接WebSocket快照）
 - **CVD**：通过 Binance aggTrades WebSocket 实时累积，每 UTC 自然日重置
+
+### ⚠️ 重要：`web/index.html` 部署方式（2026-07-11 才发现并补记，此前文档一直没写）
+- **仓库里的 `web/index.html` 不会被直接 serve！** `mb.661688.xyz` 的
+  nginx 配置（宝塔面板管理，`/www/server/panel/vhost/nginx/
+  mb.661688.xyz.conf`）`root` 指向 `/www/wwwroot/mb.661688.xyz/`，是一份
+  **独立部署的拷贝**，不是 `/opt/btc-trader/web/` 的软链接
+- 改了仓库里的 `web/index.html`（无论是本地改完 scp，还是 VPS 上直接改），
+  **网页不会自动更新**，必须额外手动执行：
+  ```bash
+  cp /opt/btc-trader/web/index.html /www/wwwroot/mb.661688.xyz/index.html
+  ```
+  （建议先备份：`cp .../index.html .../index.html.bak.$(date +%Y%m%d_%H%M%S)`，
+  该目录下已经有一批这种备份文件，说明这个手动部署模式此前就存在）
+- `api/main.py` 是 Supervisor 服务（`btc-api`），改完直接
+  `supervisorctl restart btc-api` 生效；`web/index.html` 是纯静态文件，
+  不需要重启任何服务，`cp` 完立刻生效（浏览器可能需要强制刷新绕过缓存）
+- `web/history.html` 同理，也在 `/www/wwwroot/mb.661688.xyz/` 下独立部署
 
 ---
 
@@ -673,6 +697,7 @@ tail -20 /opt/btc-trader/logs/git_sync.log
 | 2026-07-06 | Phase 7H 阶段2（正式）：AtasBridge.dll v2026.07.06-2，基于四图真实截图确认的规则——仅用InstrumentInfo.Exchange精确匹配(Binance/BinanceFutures/OkxSpot/OkxPerpFutures四值，OKX两图TradingManager.Security恒为null不可用)，新增IdentityMode(Auto默认/Manual)，OKX×0.01换算与三个推送方法的exchange/market_type字段统一改用ResolveEffectiveIdentity()最终生效身份，Auto解析失败等同Unset(不猜测)，Auto与手动下拉框冲突时角标变黄但数据仍按Auto值；角标从阶段1原始字段摊开改为运营状态显示(AUTO/MANUAL+推送✓/✗+时间) |
 | 2026-07-06 | Bug#32（7I发现）：AtasBridge.dll只在ATAS X(Avalonia渲染,SDK v8.0.14.644)编译测试过，Sea导入普通版ATAS Platform(WPF渲染,SDK v8.0.14.290)时报ReflectionTypeLoadException缺Avalonia.Base；反射逐项核对两版本SDK发现核心API一致，仅LineTillTouch构造函数的Pen参数类型不同(ATAS X用UniversalPen/普通版用System.Drawing.Pen)，且普通版Platform目录自带的System.Drawing.Common.dll是过时的v8.0.0.0(它自己的ATAS.Indicators.dll实际要v10.0.0.0，需从.NET共享框架解析)；修复：新增AtasBridge.Platform.csproj共用同一份AtasBridge.cs，用#if ATAS_PLATFORM分支处理Pen差异，两个csproj各自编译产出双平台DLL
 | 2026-07-06 | 任务卡7I：DLL信号显示层+角标改进+双平台构建支持——AtasBridge.dll v2026.07.06-3~5，轮询GET /api/signal/latest(7G预埋,服务器零改动)仅在Binance|Perp图绘制entry/stop/t1/t2四条价格线(HorizontalLinesTillTouch)+图表上方ENGINE信号行，终态信号变灰30分钟后自动清除，轮询失败不清线；角标位置改可设置(LabelPosition+OffsetX/Y，默认左下)，状态字符从✓/✗/≠改纯ASCII(OK/ERR(n)/!=，此前非ASCII字符在Sea机器上渲染成方块)；新增AtasBridge.Platform.csproj支持普通版ATAS(Bug#32)，确立"每次升级须同时交付两平台构建"的核心约定
+| 2026-07-11 | 任务卡7J：面板信号展示+图表历史信号标记——新增只读端点GET /api/signal/history?days=7(main.py纯新增)；web/index.html新增信号展示区块(当前信号+近7天历史，独立REST轮询)；AtasBridge.dll v2026.07.11-1改用history端点轮询，当前信号仍完整四线，历史信号简化文字标记(entry价位+方向+结果，按时间戳二分查找K线定位)；发现并补记重要部署缺口：web/index.html实际部署在/www/wwwroot/mb.661688.xyz/(独立拷贝非软链接)，改仓库文件不会自动生效，需手动cp部署
 
 ### 路线图（7系列，本表未覆盖的更早阶段详见上表）
 - [x] 7A / 7A-2 / 7A-3：简报综合信号分代码化 + 14档三因子映射 + Markdown清洗
@@ -685,6 +710,9 @@ tail -20 /opt/btc-trader/logs/git_sync.log
   entry/stop/t1/t2 价格线 + ENGINE 信号行，终态30分钟后自动清除）+ 角标
   位置可设置 + 状态字符改纯ASCII + 双平台构建支持（ATAS X / ATAS
   Platform，见 Bug#32 与核心约定）
+- [x] 7J：面板信号展示（mb.661688.xyz新增信号卡片：当前信号+近7天历史）
+  + 图表历史信号标记（AtasBridge.dll改轮询/api/signal/history，历史
+  信号简化文字标记，7天窗口自动增删）+ 补记web/index.html独立部署位置
 
 ---
 

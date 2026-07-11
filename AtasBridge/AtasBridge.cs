@@ -60,8 +60,8 @@ namespace AtasBridge
     // label / read-only Version setting, so they cannot drift out of sync.
     internal static class AtasBridgeVersion
     {
-        public const string Tag  = "v2026.07.06-5";
-        public const string Desc = "Engine Signal Display + Compact Corner Label";
+        public const string Tag  = "v2026.07.11-1";
+        public const string Desc = "Signal History Chart Markers";
     }
 
     [DisplayName("AtasBridge")]
@@ -241,6 +241,15 @@ namespace AtasBridge
         private const string SIG_TAG_T1    = "AtasBridgeSigT1";
         private const string SIG_TAG_T2    = "AtasBridgeSigT2";
 
+        // Phase 7J: lightweight markers for terminal signals from the last
+        // 7 days (current signal keeps its full 4-line display above; full
+        // lines for every historical signal would clutter the chart - Sea
+        // confirmed simplified markers for history, full lines for current).
+        // Tracks which ids currently have a marker so markers for signals
+        // that age out of the 7-day window can be removed on the next poll.
+        private readonly HashSet<int> _histMarkerIds = new();
+        private const string SIG_HIST_PREFIX = "AtasBridgeSigHist";
+
         // --- large trade dedup ---
         // 2026-07-01 重构：原来用单变量 _lastTrade/_lastLevel 只记"最近一笔"，
         // 如果两笔不同方向/不同价位的单子几乎同时在累积（买方在A价位堆量的
@@ -276,7 +285,22 @@ namespace AtasBridge
         protected override void OnDispose()
         {
             ClearSignalDrawing();
+            ClearAllHistoricalMarkers();
             base.OnDispose();
+        }
+
+        // Phase 7J: unlike ClearSignalDrawing (called mid-operation whenever
+        // the current signal changes/expires), this only runs on unload -
+        // clearing historical markers on every "no current signal" poll
+        // result would defeat the point of keeping 7 days of history visible.
+        private void ClearAllHistoricalMarkers()
+        {
+            try
+            {
+                foreach (var id in _histMarkerIds) Labels.Remove(SIG_HIST_PREFIX + id);
+                _histMarkerIds.Clear();
+            }
+            catch { }
         }
 
         // ── OKX 永续合约"张→BTC"换算 ─────────────────────────────────────
@@ -871,13 +895,18 @@ namespace AtasBridge
             }
         }
 
+        // Phase 7J: polls /api/signal/history (last 7 days, added alongside
+        // this card - server change is purely additive, /api/signal/latest
+        // from 7I is untouched) instead of /api/signal/latest, so a single
+        // poll yields both the current open signal (if any) and the recent
+        // terminal ones for the historical chart markers below.
         private async Task PollSignalAsync()
         {
             if (_signalPollInFlight) return;
             _signalPollInFlight = true;
             try
             {
-                var req = new HttpRequestMessage(HttpMethod.Get, $"{VpsUrl.TrimEnd('/')}/api/signal/latest");
+                var req = new HttpRequestMessage(HttpMethod.Get, $"{VpsUrl.TrimEnd('/')}/api/signal/history?days=7");
                 if (!string.IsNullOrEmpty(AuthToken))
                     req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", AuthToken);
 
@@ -885,27 +914,34 @@ namespace AtasBridge
                 if (!httpResp.IsSuccessStatusCode) { MarkSignalPollFail(); return; }
 
                 var json = await httpResp.Content.ReadAsStringAsync().ConfigureAwait(false);
-                var resp = JsonSerializer.Deserialize<SignalLatestResponse>(json, _serOpts);
+                var resp = JsonSerializer.Deserialize<SignalHistoryResponse>(json, _serOpts);
 
-                if (resp?.Id != null)
+                if (resp?.Signals == null)
                 {
-                    ApplySignal(resp);
-                    MarkSignalPollOk();
+                    // {"status":"error",...} or an unrecognized response shape.
+                    // Treated like a poll failure; existing drawing untouched.
+                    MarkSignalPollFail();
+                    return;
                 }
-                else if (resp != null && string.Equals(resp.Status, "empty", StringComparison.OrdinalIgnoreCase))
+
+                MarkSignalPollOk();
+
+                var open = resp.Signals.FirstOrDefault(s =>
+                    s.Id.HasValue && string.Equals(s.Status, "open", StringComparison.OrdinalIgnoreCase));
+                if (open != null)
                 {
-                    // No open signal on the server - clear whatever is drawn.
-                    ClearSignalDrawing();
-                    _activeSignal = null;
-                    MarkSignalPollOk();
+                    ApplySignal(open);
                 }
                 else
                 {
-                    // {"status":"error",...} or an unrecognized response shape.
-                    // Treated like a poll failure for the status indicator;
-                    // existing drawing (if any) is left untouched.
-                    MarkSignalPollFail();
+                    ClearSignalDrawing();
+                    _activeSignal = null;
                 }
+
+                var historical = resp.Signals
+                    .Where(s => s.Id.HasValue && !string.Equals(s.Status, "open", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                UpdateHistoricalMarkers(historical);
             }
             catch
             {
@@ -930,7 +966,7 @@ namespace AtasBridge
             _signalPollFailCount++;
         }
 
-        private void ApplySignal(SignalLatestResponse resp)
+        private void ApplySignal(SignalItem resp)
         {
             if (!resp.Id.HasValue) return;
 
@@ -1053,6 +1089,104 @@ namespace AtasBridge
                 Labels.Remove(SIG_TAG_T2);
             }
             catch { }
+        }
+
+        // Phase 7J: draws/updates a compact one-line marker at each
+        // historical (non-open) signal's entry price/bar - direction + id +
+        // outcome, no lines. Called once per poll (not every tick, unlike
+        // the current signal's DrawSignalLines) since historical entries
+        // don't need to track CurrentBar. Removes markers for any id that
+        // has aged out of the 7-day window since the previous poll.
+        private void UpdateHistoricalMarkers(List<SignalItem> historical)
+        {
+            try
+            {
+                var newIds = new HashSet<int>(historical.Select(s => s.Id!.Value));
+
+                foreach (var oldId in _histMarkerIds.Where(id => !newIds.Contains(id)).ToList())
+                {
+                    Labels.Remove(SIG_HIST_PREFIX + oldId);
+                    _histMarkerIds.Remove(oldId);
+                }
+
+                foreach (var s in historical)
+                {
+                    if (!TryParseBjTimeToUtc(s.CreatedAt, out var utcTime)) continue;
+                    int bar = FindBarForUtcTime(utcTime);
+                    var candle = GetCandle(bar);
+                    if (candle == null) continue;
+
+                    decimal entryPrice = s.Entry.HasValue ? (decimal)s.Entry.Value : candle.Close;
+                    var (color, outcomeShort) = HistOutcomeStyle(s.Status);
+                    string text = $"{s.Direction} #{s.Id} {outcomeShort}";
+                    string tag = SIG_HIST_PREFIX + s.Id!.Value;
+
+                    Labels[tag] = new DrawingText(TickSize)
+                    {
+                        Text         = text,
+                        Bar          = bar,
+                        TextPrice    = entryPrice,
+                        IsAbovePrice = true,
+                        Textcolor    = color,
+                        FontSize     = 10f,
+                        Tag          = tag
+                    };
+                    _histMarkerIds.Add(s.Id!.Value);
+                }
+            }
+            catch { }
+        }
+
+        private static (Color color, string text) HistOutcomeStyle(string? status)
+        {
+            switch ((status ?? "").ToLowerInvariant())
+            {
+                case "t2_hit":       return (Color.LightGreen, "T2 OK");
+                case "t1_then_stop": return (Color.Orange,      "T1>SL");
+                case "stopped":      return (Color.OrangeRed,   "SL");
+                case "expired":      return (Color.Gray,        "EXP");
+                default:             return (Color.Gray,        status ?? "?");
+            }
+        }
+
+        // engine_signals.created_at is a naive Beijing-time string
+        // ("yyyy-MM-dd HH:mm:ss", see monitor/signal_engine.py's now_sgt())
+        // - parse and convert to UTC so it is comparable to candle.LastTime.
+        private static bool TryParseBjTimeToUtc(string? s, out DateTime utc)
+        {
+            utc = default;
+            if (string.IsNullOrEmpty(s)) return false;
+            if (!DateTime.TryParseExact(s, "yyyy-MM-dd HH:mm:ss",
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.None, out var bjTime))
+                return false;
+            utc = DateTime.SpecifyKind(bjTime.AddHours(-8), DateTimeKind.Utc);
+            return true;
+        }
+
+        // Binary search for the latest bar whose close time is at or before
+        // targetUtc - bars are chronologically ordered so this is safe.
+        // "Latest bar at or before" is precise enough for a marker; this
+        // isn't trying to hit the exact tick the signal fired on.
+        private int FindBarForUtcTime(DateTime targetUtc)
+        {
+            int hi = CurrentBar;
+            if (hi < 0) return 0;
+            int lo = 0, result = 0;
+            while (lo <= hi)
+            {
+                int mid = (lo + hi) / 2;
+                var candle = GetCandle(mid);
+                if (candle == null) { hi = mid - 1; continue; }
+
+                DateTime candleUtc;
+                try { candleUtc = DateTime.SpecifyKind(candle.LastTime, DateTimeKind.Utc); }
+                catch { hi = mid - 1; continue; }
+
+                if (candleUtc <= targetUtc) { result = mid; lo = mid + 1; }
+                else { hi = mid - 1; }
+            }
+            return result;
         }
 
         // ══ Phase 3: Large trade + update tracking ════════════════════════════
@@ -1265,22 +1399,29 @@ namespace AtasBridge
         public string Source      { get; set; } = "AtasBridge/5.1";
     }
 
-    // Phase 7I: GET /api/signal/latest response model. The endpoint (7G,
-    // unchanged by this card) reuses the same top-level "status" JSON key for
-    // two different meanings: the literal string "empty"/"error" when there
-    // is no row or a server-side exception, OR (when a real engine_signals
-    // row is returned) that row's own lifecycle status ("open"/"stopped"/
-    // "t1_then_stop"/"t2_hit"/"expired"). Disambiguate in code by checking
-    // Id.HasValue first - a real row always has an id, empty/error never do.
-    public sealed class SignalLatestResponse
+    // Phase 7J: GET /api/signal/history response model (added alongside
+    // this card; /api/signal/latest from 7G/7I is untouched, unused now).
+    // On success: {"count":N,"signals":[...]}. On a server-side exception:
+    // {"status":"error","detail":...} with no "signals" key - Signals comes
+    // back null in that case, which PollSignalAsync treats as a poll failure.
+    public sealed class SignalHistoryResponse
     {
-        public string? Status    { get; set; }
+        public int?               Count   { get; set; }
+        public List<SignalItem>?  Signals { get; set; }
+        public string?            Status  { get; set; }
+    }
+
+    public sealed class SignalItem
+    {
         public int?    Id        { get; set; }
+        public string? CreatedAt { get; set; }
         public string? Direction { get; set; }
         public double? Score     { get; set; }
         public double? Entry     { get; set; }
         public double? Stop      { get; set; }
         public double? T1        { get; set; }
         public double? T2        { get; set; }
+        // Lifecycle status: "open"/"stopped"/"t1_then_stop"/"t2_hit"/"expired"
+        public string? Status    { get; set; }
     }
 }

@@ -30,13 +30,14 @@ html.light {
 html,body{height:100%;background:var(--bg);color:var(--txt);font-family:var(--font-n);
   font-size:13px;overflow:hidden;-webkit-font-smoothing:antialiased;transition:background .25s,color .25s;}
 #app{display:grid;
-  grid-template-rows:64px 1fr 1fr auto 1fr;
+  grid-template-rows:64px 1fr 1fr auto auto 1fr;
   grid-template-columns:1fr 1fr 1fr 1fr;
   grid-template-areas:
     "hdr  hdr  hdr  hdr"
     "fund oi   ib   ib"
     "vp   mp   etf  etf"
     "cvd  cvd  cvd  cvd"
+    "sig  sig  sig  sig"
     "liq  liq  stat stat";
   gap:6px;padding:6px;height:100vh;}
 
@@ -173,6 +174,36 @@ html,body{height:100%;background:var(--bg);color:var(--txt);font-family:var(--fo
 .cvd-tf-lbl{font-size:12px;color:var(--txt3);font-family:var(--font-u);margin-bottom:2px;}
 .cvd-tf-val{font-size:15px;font-weight:700;font-family:var(--font-n);}
 .cvd-note{font-size:12px;color:var(--txt3);font-family:var(--font-u);flex-shrink:0;white-space:nowrap;}
+
+/* ═══ SIGNAL ENGINE（Phase 7J）═══════════════════════════════════ */
+.sig-panel{grid-area:sig;flex-direction:row!important;align-items:center;gap:14px;padding:8px 12px!important;}
+.sig-current{flex-shrink:0;min-width:230px;display:flex;align-items:center;gap:10px;
+  padding:5px 10px;border-radius:5px;border-left:3px solid var(--border2);background:var(--card2);}
+.sig-current.lng{border-left-color:var(--up);}
+.sig-current.sht{border-left-color:var(--down);}
+.sig-dir{font-size:13px;font-weight:700;padding:2px 7px;border-radius:3px;font-family:var(--font-u);flex-shrink:0;}
+.sig-current.lng .sig-dir{color:var(--up);background:rgba(0,229,204,.18);}
+.sig-current.sht .sig-dir{color:var(--down);background:rgba(255,61,110,.18);}
+.sig-cur-meta{display:flex;flex-direction:column;gap:1px;min-width:0;}
+.sig-cur-meta .sig-score{font-size:12px;color:var(--txt3);font-family:var(--font-u);white-space:nowrap;}
+.sig-cur-meta .sig-levels{font-size:13px;font-family:var(--font-n);white-space:nowrap;}
+.sig-none{color:var(--txt3);font-family:var(--font-u);font-size:13px;flex-shrink:0;min-width:230px;}
+.sig-list{flex:1;overflow-x:auto;overflow-y:hidden;display:flex;gap:6px;min-height:0;
+  scrollbar-width:thin;scrollbar-color:var(--border) transparent;}
+.sig-item{flex-shrink:0;display:flex;flex-direction:column;gap:2px;padding:4px 8px;
+  border-radius:4px;border-left:2px solid transparent;background:var(--card2);min-width:100px;font-size:12px;}
+.sig-item.lng{border-left-color:var(--up);}
+.sig-item.sht{border-left-color:var(--down);}
+.sig-item-time{color:var(--txt3);font-size:11px;font-family:var(--font-u);}
+.sig-item-dir{font-weight:700;font-family:var(--font-u);}
+.sig-item.lng .sig-item-dir{color:var(--up);}
+.sig-item.sht .sig-item-dir{color:var(--down);}
+.sig-badge{font-size:10px;padding:1px 5px;border-radius:3px;font-family:var(--font-u);align-self:flex-start;}
+.sig-badge.win{color:var(--up);background:rgba(0,229,204,.18);}
+.sig-badge.loss{color:var(--down);background:rgba(255,61,110,.18);}
+.sig-badge.mix{color:var(--warn);background:rgba(255,179,0,.18);}
+.sig-badge.flat{color:var(--txt3);background:var(--border);}
+.sig-badge.openb{color:var(--warn);background:rgba(255,179,0,.18);}
 
 /* ═══ LIQUIDATION ════════════════════════════════════════════════ */
 .liq-panel{grid-area:liq;}
@@ -423,6 +454,26 @@ html,body{height:100%;background:var(--bg);color:var(--txt);font-family:var(--fo
   <span class="cvd-note">净买盘=正(绿) · 净卖盘=负(红) · 数据源:Binance aggTrades</span>
 </div>
 
+<!-- ══ SIGNAL ENGINE（Phase 7J）══════════════════════════════════ -->
+<div class="card sig-panel">
+  <div v-if="currentSignal" class="sig-current" :class="currentSignal.direction==='LONG'?'lng':'sht'">
+    <span class="sig-dir">{{ currentSignal.direction }}</span>
+    <div class="sig-cur-meta">
+      <span class="sig-score">综合分 {{ currentSignal.score>=0?'+':'' }}{{ currentSignal.score }} · {{ sigAgo(currentSignal.created_at) }}前开仓</span>
+      <span class="sig-levels">E {{ fmtP(currentSignal.entry) }} · S {{ fmtP(currentSignal.stop) }} · T1 {{ fmtP(currentSignal.t1) }} · T2 {{ fmtP(currentSignal.t2) }}</span>
+    </div>
+  </div>
+  <div v-else class="sig-none">📡 引擎当前无活跃信号（近7天共{{ signalHistory.length }}条历史）</div>
+  <div class="sig-list">
+    <div v-if="!signalHistory.length" class="liq-empty" style="margin:auto;">暂无历史信号</div>
+    <div v-for="s in signalHistory" :key="s.id" class="sig-item" :class="s.direction==='LONG'?'lng':'sht'">
+      <span class="sig-item-time">{{ sigTime(s.created_at) }}</span>
+      <span class="sig-item-dir">{{ s.direction }} {{ s.score>=0?'+':'' }}{{ s.score }}</span>
+      <span class="sig-badge" :class="sigBadgeClass(s)">{{ sigBadgeText(s) }}</span>
+    </div>
+  </div>
+</div>
+
 <!-- ══ LIQUIDATION ══════════════════════════════════════════════ -->
 <div class="card liq-panel">
   <div class="card-title"><span>⚡ 清算大单</span><span class="ct-sub">OKX+Gate·$1万+·今日{{ liqFeed.length }}笔</span></div>
@@ -473,6 +524,7 @@ createApp({
     const funding=ref({}),oiBtc=ref(0),oiChanges=ref({});
     const cbPremium=ref(0),cbPct=ref(0);
     const liqFeed=ref([]),lastUpdate=ref('--:--:--');
+    const currentSignal=ref(null),signalHistory=ref([]);
     const flashUp=ref(false),flashDown=ref(false),clientInfo=ref('--');
     const okxLiq=ref({connected:false,last_event_sec_ago:null});
     const gateLiq=ref({connected:false,last_poll_sec_ago:null});
@@ -480,7 +532,7 @@ createApp({
     const ibAsia=ref({}),ibEurope=ref({}),ibUs=ref({});
     const vp=ref({}),mp=ref({}),etf=ref({});
     const cvdToday=ref(0),cvdChanges=ref({});
-    let liqId=0,ws=null,reconnT=null,hbT=null,healthT=null;
+    let liqId=0,ws=null,reconnT=null,hbT=null,healthT=null,sigT=null;
 
     function applyTheme(){ document.documentElement.className=isDark.value?'':'light'; }
     function toggleTheme(){ isDark.value=!isDark.value; localStorage.setItem('btc-theme',isDark.value?'dark':'light'); applyTheme(); }
@@ -517,6 +569,36 @@ createApp({
     }
     function addLiq(e){liqId++;liqFeed.value.unshift({...e,_id:`l${liqId}`});if(liqFeed.value.length>100)liqFeed.value.pop();}
     async function pollHealth(){try{const r=await fetch('/api/health');const d=await r.json();clientInfo.value=`${d.clients} 连接`;if(d.okx_liq)okxLiq.value=d.okx_liq;if(d.gate_liq)gateLiq.value=d.gate_liq;}catch(_){}}
+    // Phase 7J：信号引擎展示，独立REST轮询（/api/signal/history），不接WebSocket快照
+    async function pollSignals(){
+      try{
+        const r=await fetch('/api/signal/history?days=7');
+        const d=await r.json();
+        const sigs=d.signals||[];
+        currentSignal.value=sigs.find(s=>s.status==='open')||null;
+        signalHistory.value=sigs.filter(s=>s.status!=='open');
+      }catch(_){}
+    }
+    function sigAgo(ts){
+      const t=Date.parse((ts||'').replace(' ','T')+'+08:00');
+      if(isNaN(t))return'--';
+      const sec=Math.max(0,(Date.now()-t)/1000);
+      if(sec<3600)return`${Math.round(sec/60)}分钟`;
+      if(sec<86400)return`${(sec/3600).toFixed(1)}小时`;
+      return`${Math.round(sec/86400)}天`;
+    }
+    function sigTime(ts){return(ts||'').slice(5,16);}
+    function sigBadgeClass(s){
+      if(s.status==='t2_hit')return'win';
+      if(s.status==='stopped')return'loss';
+      if(s.status==='t1_then_stop')return'mix';
+      if(s.status==='expired')return'flat';
+      return'openb';
+    }
+    function sigBadgeText(s){
+      const map={t2_hit:'T2命中',stopped:'止损',t1_then_stop:'T1后止损',expired:'到期',open:'持仓中'};
+      return map[s.status]||s.status;
+    }
 
     const fmtP=v=>v?Number(v).toLocaleString('en-US',{minimumFractionDigits:1,maximumFractionDigits:1}):'--';
     const fmtVol=v=>!v?'--':v>=1e9?`$${(v/1e9).toFixed(2)}B`:v>=1e6?`$${(v/1e6).toFixed(0)}M`:`$${v.toFixed(0)}`;
@@ -687,14 +769,15 @@ createApp({
       return'●轮询中';
     });
 
-    onMounted(()=>{applyTheme();connect();pollHealth();healthT=setInterval(pollHealth,60000);});
-    onUnmounted(()=>{if(ws)ws.close();clearInterval(hbT);clearInterval(healthT);clearTimeout(reconnT);});
+    onMounted(()=>{applyTheme();connect();pollHealth();healthT=setInterval(pollHealth,60000);pollSignals();sigT=setInterval(pollSignals,30000);});
+    onUnmounted(()=>{if(ws)ws.close();clearInterval(hbT);clearInterval(healthT);clearInterval(sigT);clearTimeout(reconnT);});
 
     return{
       connected,price,change24h,volume24h,funding,oiBtc,oiChanges,
       cbPremium,cbPct,liqFeed,lastUpdate,flashUp,flashDown,clientInfo,isDark,
       ibAsia,ibEurope,ibUs,ibChart,vp,vpChart,mp,mpChart,mpPositionText,etf,
       cvdToday,cvdChanges,cvdTfList,
+      currentSignal,signalHistory,sigAgo,sigTime,sigBadgeClass,sigBadgeText,
       sortedFunding,sentiment,oiTFData,cbSignal,maxLiq,
       okxLiqText,okxLiqClass,gateLiqText,gateLiqClass,
       fmtP,fmtVol,fmtOI,fmtUsd,fmtOIVal,fmtCvd,fColor,

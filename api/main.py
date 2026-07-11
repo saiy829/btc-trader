@@ -1649,3 +1649,23 @@ async def signal_latest():
         return dict(row)
     except Exception as e:
         return {"status": "error", "detail": str(e)}
+
+
+# Phase 7J：信号历史只读端点，为面板信号展示 + AtasBridge 图表历史标记预埋。
+# 与 /api/signal/latest 同样只读，不涉及任何写操作。默认最近7天，不限条数
+# （Sea 2026-07 确认：日内交易场景，7天窗口够用，不用管条数上限）。
+@app.get("/api/signal/history")
+async def signal_history(days: int = 7):
+    """返回 engine_signals 表最近 N 天全部记录（全字段，按时间倒序）"""
+    try:
+        cutoff = (datetime.now(SGT) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        conn = sqlite3.connect(_ATAS_DB, timeout=5)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM engine_signals WHERE created_at >= ? ORDER BY id DESC",
+            (cutoff,)
+        ).fetchall()
+        conn.close()
+        return {"count": len(rows), "signals": [dict(r) for r in rows]}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}

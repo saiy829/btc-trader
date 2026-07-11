@@ -1,4 +1,4 @@
-# PROJECT_INDEX（自动生成于 2026-07-11 22:15:54 北京时间，勿手改）
+# PROJECT_INDEX（自动生成于 2026-07-11 22:26:56 北京时间，勿手改）
 
 ## 文件结构
 ```
@@ -18,6 +18,7 @@
 ./briefing/atas_briefing_data.py
 ./briefing/binance_briefing_data.py
 ./btc_history.db
+./CLAUDE.md
 ./daily_briefing.py
 ./data_collector/binance_data.py
 ./data_collector/cme_data.py
@@ -140,17 +141,17 @@ API 服务   : api/main.py（FastAPI，端口 8001，Supervisor: btc-api）
 
 ## Supervisor 服务实时状态
 ```
-btc-api                          RUNNING   pid 399969, uptime 5 days, 3:40:13
-btc-binance-data                 RUNNING   pid 3060699, uptime 10 days, 10:11:10
-btc-briefing                     RUNNING   pid 293936, uptime 5 days, 12:07:03
-btc-dom-monitor                  RUNNING   pid 3060697, uptime 10 days, 10:11:10
-btc-funding-monitor              RUNNING   pid 3060695, uptime 10 days, 10:11:10
-btc-gate-liq                     RUNNING   pid 3105755, uptime 10 days, 5:43:25
-btc-liq-monitor                  RUNNING   pid 3115440, uptime 10 days, 4:46:03
-btc-oi-monitor                   RUNNING   pid 3060696, uptime 10 days, 10:11:10
-btc-signal-engine                RUNNING   pid 380511, uptime 5 days, 5:09:12
-btc-signal-tracker               RUNNING   pid 3146305, uptime 10 days, 1:42:52
-btc-structure-monitor            RUNNING   pid 262033, uptime 5 days, 14:47:28
-sales_dashboard                  RUNNING   pid 4045391, uptime 6:00:25
-trade-review-api                 RUNNING   pid 3896464, uptime 7 days, 6:47:22
+btc-api                          RUNNING   pid 399969, uptime 5 days, 3:51:15
+btc-binance-data                 RUNNING   pid 3060699, uptime 10 days, 10:22:12
+btc-briefing                     RUNNING   pid 293936, uptime 5 days, 12:18:05
+btc-dom-monitor                  RUNNING   pid 3060697, uptime 10 days, 10:22:12
+btc-funding-monitor              RUNNING   pid 3060695, uptime 10 days, 10:22:12
+btc-gate-liq                     RUNNING   pid 3105755, uptime 10 days, 5:54:27
+btc-liq-monitor                  RUNNING   pid 3115440, uptime 10 days, 4:57:05
+btc-oi-monitor                   RUNNING   pid 3060696, uptime 10 days, 10:22:12
+btc-signal-engine                RUNNING   pid 380511, uptime 5 days, 5:20:14
+btc-signal-tracker               RUNNING   pid 3146305, uptime 10 days, 1:53:54
+btc-structure-monitor            RUNNING   pid 262033, uptime 5 days, 14:58:30
+sales_dashboard                  RUNNING   pid 4045391, uptime 6:11:27
+trade-review-api                 RUNNING   pid 3896464, uptime 7 days, 6:58:24
 ```
