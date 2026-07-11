@@ -60,8 +60,8 @@ namespace AtasBridge
     // label / read-only Version setting, so they cannot drift out of sync.
     internal static class AtasBridgeVersion
     {
-        public const string Tag  = "v2026.07.11-3";
-        public const string Desc = "Hide Unused Default DataSeries";
+        public const string Tag  = "v2026.07.11-4";
+        public const string Desc = "Default Label Offset 10/-150";
     }
 
     [DisplayName("AtasBridge")]
@@ -175,11 +175,16 @@ namespace AtasBridge
         // area, and an 8px margin was not enough clearance). Rather than
         // guess a "correct" margin for every theme/DPI, expose manual pixel
         // offsets so Sea can nudge the label to a visible spot themselves.
+        // Phase 7K follow-up: defaults changed from 0/0 to 10/-150 - Sea
+        // confirmed these values work well on their own setup and wants
+        // them baked in as the out-of-the-box default for new chart
+        // instances, instead of starting at 0/0 and needing a manual nudge
+        // every time.
         [Display(Name = "角标水平偏移", GroupName = "5. 身份角标", Order = 3)]
-        public int LabelOffsetX { get; set; } = 0;
+        public int LabelOffsetX { get; set; } = 10;
 
         [Display(Name = "角标垂直偏移", GroupName = "5. 身份角标", Order = 4)]
-        public int LabelOffsetY { get; set; } = 0;
+        public int LabelOffsetY { get; set; } = -150;
 
         // Phase 7I/7J: polls the VPS's GET /api/signal/history and draws the
         // current open engine_signals row (entry/stop/t1/t2) as price lines
