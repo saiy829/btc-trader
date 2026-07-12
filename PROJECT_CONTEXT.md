@@ -568,6 +568,23 @@ subprocess.run(['wp', 'post', 'create', ...])
   `/api/signal/latest` 未废弃但 AtasBridge 已改用这个新端点（一次轮询
   同时拿到当前信号+历史信号）
 
+### 吸收信号结果追踪（signal_tracker.py，Phase 5A，此前文档未详细记录）：
+- 独立 Supervisor 服务，与 `signal_engine.py`（综合分模拟信号）是完全
+  不同的两套系统——本服务追踪的是 AtasBridge 推上来的**原生吸收信号**
+  （`atas_signals` 表，`indicator_name LIKE '%Absorption%'`），不是
+  综合分信号
+- 每5分钟：把过去2小时内新出现、还没登记过的吸收信号写入
+  `atas_signal_outcomes`（记录触发时刻的 POC/Delta/CVD、与POC的相对
+  位置），并回查所有已到期（`check_4h_at`/`check_24h_at`已过）但还
+  未结算的信号，用涨跌幅+0.5%(4H)/±1%(24H)阈值分类 up/down/flat，
+  为验证"吸收信号是否有统计意义上的预测力"积累样本
+- 固定只看币安永续这一路（`atas_bars`/`get_latest_bar()` 过滤
+  `exchange='binance' AND market_type='perp'`），原因见文件头注释：
+  AtasBridge同时接四路数据写进同一张表，不过滤会把OKX/现货的bar
+  错记成触发时刻的上下文，污染胜率样本
+- 只在日志里输出统计（`print_stats()`，每小时一次），未对接Telegram/
+  面板/图表——目前是纯研究性质的数据积累，还没有变成"交易信号"
+
 ---
 
 ## 十三、实时面板（mb.661688.xyz）
@@ -710,6 +727,7 @@ tail -20 /opt/btc-trader/logs/git_sync.log
 | 2026-07-06 | 任务卡7I：DLL信号显示层+角标改进+双平台构建支持——AtasBridge.dll v2026.07.06-3~5，轮询GET /api/signal/latest(7G预埋,服务器零改动)仅在Binance|Perp图绘制entry/stop/t1/t2四条价格线(HorizontalLinesTillTouch)+图表上方ENGINE信号行，终态信号变灰30分钟后自动清除，轮询失败不清线；角标位置改可设置(LabelPosition+OffsetX/Y，默认左下)，状态字符从✓/✗/≠改纯ASCII(OK/ERR(n)/!=，此前非ASCII字符在Sea机器上渲染成方块)；新增AtasBridge.Platform.csproj支持普通版ATAS(Bug#32)，确立"每次升级须同时交付两平台构建"的核心约定
 | 2026-07-11 | 任务卡7J：面板信号展示+图表历史信号标记——新增只读端点GET /api/signal/history?days=7(main.py纯新增)；web/index.html新增信号展示区块(当前信号+近7天历史，独立REST轮询)；AtasBridge.dll v2026.07.11-1改用history端点轮询，当前信号仍完整四线，历史信号简化文字标记(entry价位+方向+结果，按时间戳二分查找K线定位)；发现并补记重要部署缺口：web/index.html实际部署在/www/wwwroot/mb.661688.xyz/(独立拷贝非软链接)，改仓库文件不会自动生效，需手动cp部署
 | 2026-07-11 | 任务卡7K：数据推送总开关+设置面板中文化——AtasBridge.dll v2026.07.11-2，新增EnableDataPush总开关(默认true，关闭后K线/大单/吸收三路推送全停，身份角标和引擎信号显示不受影响)，解决Sea在ATAS X和普通版ATAS两平台重复挂图但只想一边推数据的需求；设置面板24处Display(Name=/GroupName=)全部改中文(6个分组+各设置项)，枚举值本身保留英文(避免破坏ToString()回读逻辑)；澄清"渲染字符串须ASCII"规则适用范围仅限图表画布绘图+日志+JSON payload，不含原生设置面板文本
+| 2026-07-12 | Bug#33：signal_tracker.py(Phase 5A吸收信号结果追踪)的get_current_price()查binance_structure表的price列(真实列名是mark_px)，异常被except吞掉返回None，check_outcomes()拿到None直接跳过整轮，导致4H/24H结果回查从服务上线(2026-06-30)起从未真正跑通，11万3千+条信号积压12天；同时修正设计缺陷——原逻辑整轮用同一个"现价"给所有到期信号结算，若有积压会导致全部信号被错误地按补跑那一刻的价格计算涨跌；改为新增get_price_at_time()按atas_bars历史K线回填每条信号自己到期时刻的真实历史价，每500条提交一次避免长时间占写锁；补算前备份atas_signal_outcomes全量；修复后立即补算完成4H结果98710条+24H结果67834条，历史价100%查到零跳过
 
 ### 路线图（7系列，本表未覆盖的更早阶段详见上表）
 - [x] 7A / 7A-2 / 7A-3：简报综合信号分代码化 + 14档三因子映射 + Markdown清洗
