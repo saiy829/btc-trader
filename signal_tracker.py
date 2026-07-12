@@ -28,14 +28,52 @@ def get_conn():
 
 
 def get_current_price():
-    """从 binance_structure 取最新价格"""
+    """
+    从 binance_structure 取最新价格。仅供 register_new_signals() 记录触发
+    时刻的参考价使用（还有 atas_bars.close 兜底，见调用处）；4H/24H 结果
+    回查不用这个，改用下面的 get_price_at_time() 按各自到期时刻查历史价——
+    原来这里查的是不存在的 price 列（真实列名是 mark_px），查询直接报错
+    被 except Exception 吞掉，check_outcomes() 拿到 None 就整轮跳过，导致
+    结果回查从上线起就没有真正跑通过（2026-07-12 发现，见下方修复记录）。
+    """
     try:
         conn = get_conn()
         row = conn.execute(
-            "SELECT price FROM binance_structure ORDER BY ts DESC LIMIT 1"
+            "SELECT mark_px FROM binance_structure ORDER BY ts DESC LIMIT 1"
         ).fetchone()
         conn.close()
-        return float(row["price"]) if row and row["price"] else None
+        return float(row["mark_px"]) if row and row["mark_px"] else None
+    except Exception:
+        return None
+
+
+def get_price_at_time(target_time_str: str):
+    """
+    查 atas_bars（固定币安永续，理由同 get_latest_bar）里最接近
+    target_time_str（"YYYY-MM-DD HH:MM:SS" 北京时间字符串）的那根K线收盘价。
+    回查4H/24H结果必须用"目标到期时刻"的历史价，不能用"现在"的价格——
+    否则一次性补跑积压信号时，全部会被错误地按"补跑那一刻"结算，而不是
+    各自真正到期的那一刻，统计会完全失真（这正是本次修复要同时解决的
+    第二个问题，不只是列名报错那一个）。
+    优先找 <= 目标时间里最近的一根；找不到（比如目标时间早于数据起点）
+    再退而找 >= 目标时间里最近的一根。
+    """
+    try:
+        conn = get_conn()
+        target_iso = target_time_str.replace(" ", "T") + "+08:00"
+        row = conn.execute("""
+            SELECT close FROM atas_bars
+            WHERE exchange='binance' AND market_type='perp' AND timestamp <= ?
+            ORDER BY timestamp DESC LIMIT 1
+        """, (target_iso,)).fetchone()
+        if not row:
+            row = conn.execute("""
+                SELECT close FROM atas_bars
+                WHERE exchange='binance' AND market_type='perp' AND timestamp >= ?
+                ORDER BY timestamp ASC LIMIT 1
+            """, (target_iso,)).fetchone()
+        conn.close()
+        return float(row["close"]) if row and row["close"] else None
     except Exception:
         return None
 
@@ -117,23 +155,29 @@ def register_new_signals():
 
 
 def check_outcomes():
-    """回查已到期的信号，记录价格结果"""
+    """
+    回查已到期的信号，记录价格结果。每条信号用它自己 check_4h_at/
+    check_24h_at 那一刻的历史价（get_price_at_time），不是"现在"的价格——
+    2026-07-12 修复：原来整轮用同一个 get_current_price() 给所有到期信号
+    结算，一旦有积压（本次就是12天、11万+条），全部会被错误地按"补跑
+    那一刻"算涨跌，而不是各自真正到期的时刻，统计毫无意义。
+    每500条提交一次，避免一次性处理大批量积压时长时间占着写锁，
+    影响其它同时在写这个库的服务（main.py/signal_engine.py等）。
+    """
     try:
         conn  = get_conn()
-        now   = datetime.now(SGT)
-        now_s = now.strftime("%Y-%m-%d %H:%M:%S")
-        price = get_current_price()
-        if not price:
-            conn.close()
-            return
+        now_s = datetime.now(SGT).strftime("%Y-%m-%d %H:%M:%S")
 
-        # 检查4H到期
         due_4h = conn.execute("""
-            SELECT id, trigger_price FROM atas_signal_outcomes
+            SELECT id, trigger_price, check_4h_at FROM atas_signal_outcomes
             WHERE checked_4h=0 AND check_4h_at <= ?
         """, (now_s,)).fetchall()
 
+        done = 0
         for row in due_4h:
+            price = get_price_at_time(row["check_4h_at"])
+            if price is None:
+                continue
             chg = (price - row["trigger_price"]) / row["trigger_price"] * 100
             outcome = "up" if chg > 0.5 else ("down" if chg < -0.5 else "flat")
             conn.execute("""
@@ -141,15 +185,24 @@ def check_outcomes():
                 SET price_4h=?, change_4h=?, outcome_4h=?, checked_4h=1
                 WHERE id=?
             """, (price, round(chg, 3), outcome, row["id"]))
-            log.info(f"[TRACKER] 4H结果 id={row['id']} chg={chg:+.2f}% outcome={outcome}")
+            done += 1
+            if done % 500 == 0:
+                conn.commit()
+                log.info(f"[TRACKER] 4H结果补算中 {done}/{len(due_4h)}")
+        conn.commit()
+        if due_4h:
+            log.info(f"[TRACKER] 4H结果本轮完成 {done}/{len(due_4h)} 条（跳过{len(due_4h)-done}条，历史价查不到）")
 
-        # 检查24H到期
         due_24h = conn.execute("""
-            SELECT id, trigger_price FROM atas_signal_outcomes
+            SELECT id, trigger_price, check_24h_at FROM atas_signal_outcomes
             WHERE checked_24h=0 AND check_24h_at <= ?
         """, (now_s,)).fetchall()
 
+        done = 0
         for row in due_24h:
+            price = get_price_at_time(row["check_24h_at"])
+            if price is None:
+                continue
             chg = (price - row["trigger_price"]) / row["trigger_price"] * 100
             outcome = "up" if chg > 1.0 else ("down" if chg < -1.0 else "flat")
             conn.execute("""
@@ -157,9 +210,14 @@ def check_outcomes():
                 SET price_24h=?, change_24h=?, outcome_24h=?, checked_24h=1
                 WHERE id=?
             """, (price, round(chg, 3), outcome, row["id"]))
-            log.info(f"[TRACKER] 24H结果 id={row['id']} chg={chg:+.2f}% outcome={outcome}")
-
+            done += 1
+            if done % 500 == 0:
+                conn.commit()
+                log.info(f"[TRACKER] 24H结果补算中 {done}/{len(due_24h)}")
         conn.commit()
+        if due_24h:
+            log.info(f"[TRACKER] 24H结果本轮完成 {done}/{len(due_24h)} 条（跳过{len(due_24h)-done}条，历史价查不到）")
+
         conn.close()
     except Exception as e:
         log.warning(f"[TRACKER] check error: {e}")
