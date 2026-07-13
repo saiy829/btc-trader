@@ -54,9 +54,10 @@ CHAT_ID   = get_env("TELEGRAM_CHAT_ID")
 
 # ── 常量集中区：供 Phase 5B 拿到胜率数据后统一调参 ──────────────────────
 CYCLE_MIN     = 5     # 主循环周期（分钟），对齐到整点的整数倍
-THRESH_LONG   = 60    # 综合分上穿 → LONG 信号
-THRESH_SHORT  = -60   # 综合分下穿 → SHORT 信号
-REARM_BAND    = 40    # 迟滞带：|分数|回落到此值以内才允许再次武装
+# 2026-07-13 循证校准(7N)：9日实测|分|max=33/p95=25，±60不可达；冻结至样本≥30
+THRESH_LONG   = 25    # 综合分上穿 → LONG 信号
+THRESH_SHORT  = -25   # 综合分下穿 → SHORT 信号
+REARM_BAND    = 15    # 迟滞带：|分数|回落到此值以内才允许再次武装
 COOLDOWN_MIN  = 90    # 同方向信号最小间隔（分钟），只影响是否发TG
 
 ATR_INTERVAL  = "15m"
@@ -69,7 +70,7 @@ EXPIRE_HOURS  = 24     # 开仓超过这个小时数未触及任何边界 → ex
 
 
 # ══════════════════════════════════════════════════════════════════
-#  数据库：engine_signals 表（本卡唯一授权的结构变更）
+#  数据库：engine_signals 表（7G）+ engine_scores 遥测表（7N）
 # ══════════════════════════════════════════════════════════════════
 
 def _ensure_table():
@@ -102,7 +103,44 @@ def _ensure_table():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_engine_signals_status ON engine_signals(status)")
     conn.commit()
     conn.close()
-    logger.info("engine_signals 表已就绪")
+
+    # 7N：每轮评分遥测表。ts(epoch秒)做主键天然去重；无额外索引。
+    # 与 signal_scores 同名列语义对齐，但两张表严格分离——signal_scores
+    # 只属于简报链路（环比对比读它的最新一条），引擎绝不能写入。
+    conn = sqlite3.connect(DB_PATH, timeout=5)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS engine_scores (
+            ts INTEGER PRIMARY KEY,
+            composite REAL, label TEXT,
+            etf_s REAL, fr_s REAL, quad_s REAL, ls_s REAL, cb_s REAL, regime_s REAL,
+            detail_json TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+    logger.info("engine_signals / engine_scores 表已就绪")
+
+
+def _record_score(result: dict):
+    """
+    7N遥测：每轮成功完成评分后落一行 engine_scores（跳过轮不写）。
+    写库失败仅告警，绝不影响主循环。
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5)
+        conn.execute(
+            "INSERT OR REPLACE INTO engine_scores "
+            "(ts, composite, label, etf_s, fr_s, quad_s, ls_s, cb_s, regime_s, detail_json) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (int(time.time()), result["composite"], result["label"],
+             result["etf_s"], result["fr_s"], result["quad_s"],
+             result["ls_s"], result["cb_s"], result["regime_s"],
+             json.dumps(result["detail"], ensure_ascii=False))
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"engine_scores 遥测写入失败: {e}")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -126,6 +164,28 @@ def _send_tg(text: str):
 #  六维数据采集（与简报同源，不另造采集逻辑）
 # ══════════════════════════════════════════════════════════════════
 
+# 7N：ETF维度进程内TTL缓存。ETF是日粒度数据，但此前引擎每5分钟全量执行
+# 双源采集（含爬Farside网站），288次/天有封IP风险且毫无必要。成功结果
+# 缓存1小时；TTL内直接复用不发网络请求；缓存过期且本轮实取失败 → 维持
+# 原"宁缺勿假"逻辑跳过本轮，绝不拿过期缓存凑数。
+ETF_CACHE_TTL_SEC = 3600
+_etf_cache = {"ts": 0.0, "data": None}
+
+
+def _fetch_etf_cached():
+    now = time.time()
+    age = now - _etf_cache["ts"]
+    if _etf_cache["data"] is not None and age < ETF_CACHE_TTL_SEC:
+        logger.info(f"ETF(缓存)：复用{int(age)}秒前的采集结果，TTL={ETF_CACHE_TTL_SEC}秒")
+        return _etf_cache["data"]
+    etf = fetch_etf_flows()   # 异常向上抛，由调用方按原逻辑跳过本轮
+    if etf and etf.get("has_data"):
+        _etf_cache["ts"] = now
+        _etf_cache["data"] = etf
+        logger.info(f"ETF(实取)：采集成功，缓存{ETF_CACHE_TTL_SEC}秒")
+    return etf
+
+
 def compute_current_score():
     """
     采集 compute_scores() 所需全部输入并调用之。
@@ -144,7 +204,7 @@ def compute_current_score():
         return None
 
     try:
-        etf = fetch_etf_flows()
+        etf = _fetch_etf_cached()
     except Exception as e:
         logger.warning(f"跳过本轮：ETF数据获取异常: {e}")
         return None
@@ -449,6 +509,7 @@ def run_cycle(state: EngineState):
 
     score = result["composite"]
     logger.info(f"综合分={score:+d}（{result['label']}）armed={state.armed}")
+    _record_score(result)   # 7N遥测：只有成功评分的轮次会走到这里
 
     direction = check_trigger(state, score)
     if direction:
