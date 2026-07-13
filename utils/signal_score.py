@@ -172,31 +172,37 @@ def _query_market_snapshot():
 # ── 六维打分函数（每个返回 (分数:int, 备注:str|None)）─────────────────────
 
 def _score_etf(etf: dict):
-    # 7M ETF稳定视图：单日分量只用"最近一个已确认完整交易日"的净流量
-    # （stable_flow_m，见 data_collector/etf_data.py v5），不再用可能处于
-    # 披露窗口内的 total_yest 阶段值。stable_flow_m 缺失（首次部署 state
-    # 尚无记录）→ 整个维度按"数据缺失"处理（简报侧记0分，引擎侧由
-    # signal_engine 自己的门槛判断宁缺勿假跳过本轮）。
+    # 7M/7M-2 ETF稳定视图（单日+累计全口径）：本维度两个分量全部只用
+    # "最近一个已确认完整交易日"（stable_date）口径的数据——
+    #   单日分量：stable_flow_m（7M，state持久化）
+    #   周累计分量：stable_week_m（7M-2，截至stable_date的逐日区间求和）
+    # 披露窗口（北京04:00-12:00）内的当日阶段值只供简报正文展示，
+    # 不再进入任何量化评分。stable_flow_m 缺失（首次部署 state 尚无记录）
+    # → 整个维度按"数据缺失"处理（简报侧记0分，引擎侧由 signal_engine
+    # 自己的门槛判断宁缺勿假跳过本轮）；stable_week_m 单独缺失 → 仅该
+    # 分量按0计并在 detail_json 标注 etf_week_source=missing。
     # 已知副作用（7M裁定"正确性优先"）：该维度从连续更新变为每日12:00后
-    # 阶跃一次，与7N校准时的分布存在轻微偏差，Phase 5B 回测时知悉即可；
-    # 另外周累计分量 total_week 仍含披露窗口内的当日阶段值（本卡未改），
-    # 残余影响最大约 40分×25%权重=10个综合分点，已向 Sea 报告留待裁定。
+    # 阶跃一次，与7N校准时的分布存在轻微偏差，Phase 5B 回测时知悉即可。
+    # （7M时"周分量仍含阶段值、残余≤10综合分点"的问题已由7M-2消除）
     if not etf or not etf.get("has_data"):
         return 0, "数据缺失"
     stable = etf.get("stable_flow_m")
     if stable is None:
         return 0, "数据缺失（稳定视图暂无记录，etf_source=missing）"
     cfg = SCORE_CONFIG["etf"]
-    # stable_flow_m / total_week 单位是百万美元（见 data_collector/etf_data.py _fmt_cny），
-    # 换算成"亿美元"要除以100
+    # stable_flow_m / stable_week_m 单位是百万美元（见 data_collector/etf_data.py
+    # _fmt_cny），换算成"亿美元"要除以100
     yest_yi = stable / 100
-    week_yi = (etf.get("total_week") or 0) / 100
+    week_stable = etf.get("stable_week_m")
+    week_yi = (week_stable if week_stable is not None else 0) / 100
     s1 = _clamp(yest_yi * cfg["yest_mult"], -cfg["yest_clamp"], cfg["yest_clamp"])
     s2 = _clamp(week_yi * cfg["week_mult"], -cfg["week_clamp"], cfg["week_clamp"])
-    note = None
+    notes = []
     if etf.get("stable_date") and etf.get("stable_date") != etf.get("date"):
-        note = f"稳定视图：用{etf['stable_date']}已确认数据（当日值仍在披露窗口内）"
-    return round(s1 + s2), note
+        notes.append(f"稳定视图：用{etf['stable_date']}已确认数据（当日值仍在披露窗口内）")
+    if week_stable is None:
+        notes.append("周累计稳定值缺失，该分量按0计（etf_week_source=missing）")
+    return round(s1 + s2), ("；".join(notes) or None)
 
 
 def _score_funding_z(fr_zscore):
@@ -379,6 +385,12 @@ def compute_scores(fr_zscore, etf: dict, cb_premium, regime_label: str,
                                else "missing"),
                 "etf_stable_flow_m": etf.get("stable_flow_m") if etf else None,
                 "etf_stable_date": etf.get("stable_date") if etf else None,
+                # 7M-2周分量溯源：stable=披露窗口内用截至stable_date的累计 /
+                # realtime=非窗口期(数值与实时累计恒等) / missing=稳定值缺失按0计
+                "etf_week_source": ("missing" if (not etf or not etf.get("has_data")
+                                                  or etf.get("stable_week_m") is None)
+                                    else ("stable" if etf.get("is_settling") else "realtime")),
+                "etf_stable_week_m": etf.get("stable_week_m") if etf else None,
             },
             "notes": {
                 "etf": etf_note, "funding_z": fr_note, "oi_quadrant": quad_note,

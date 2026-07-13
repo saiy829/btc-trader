@@ -441,14 +441,18 @@ ETF流向25% / 资金费率Z-score15% / OI象限20% / 大户多空比15% / CB溢
 
 数据来源：
 - ETF净流 / CB溢价：由 build_prompt() 参数直接传入（外部API采集，不在本地表）
-- **ETF稳定视图规则（2026-07-13 7M）**：量化评分的ETF维度单日分量只用
-  `fetch_etf_flows()` 返回的 `stable_flow_m`/`stable_date`（最近一个已确认
-  完整交易日的净流；is_settling=False 时落入 data/etf_state.json 持久化，
-  北京04:00-12:00披露窗口内读上一稳定值，顺带修正了该state文件被整体覆盖
-  写的bug）。stable缺失（首次部署）→ 简报侧该维记0分+detail_json标注
-  etf_source=missing，引擎侧宁缺勿假跳过本轮。已知副作用（Sea裁定正确性
-  优先）：该维从连续更新变为每日12:00后阶跃一次；周累计分量 total_week
-  仍含窗口内当日阶段值（残余影响最大≈10个综合分点，留待后续裁定）
+- **ETF稳定视图规则（2026-07-13 7M + 7M-2，单日+累计全口径）**：量化评分
+  的ETF维度只用"最近一个已确认完整交易日"（stable_date）口径的数据——
+  单日分量用 `stable_flow_m`（7M，is_settling=False 时落入
+  data/etf_state.json 持久化，顺带修正了该state文件被整体覆盖写的bug）；
+  周累计分量用 `stable_week_m`（7M-2，截至stable_date的逐日区间求和，
+  每次fetch重算无需state）。北京04:00-12:00披露窗口内的当日阶段值只供
+  简报正文展示，不进入任何量化评分。stable_flow_m缺失（首次部署）→
+  简报侧整维记0分+detail_json标etf_source=missing，引擎侧宁缺勿假跳过；
+  stable_week_m单独缺失→仅该分量按0计+etf_week_source=missing。
+  detail_json溯源字段：etf_source、etf_stable_date、etf_week_source
+  （stable/realtime/missing）。已知副作用（Sea裁定正确性优先）：该维从
+  连续更新变为每日12:00后阶跃一次（7M时周分量的阶段值残余已由7M-2消除）
 - 资金费率Z-score：复用 `binance_briefing_data.get_market_meta()["fr_zscore"]`，
   不重新计算，避免和其他地方显示的 Z 值数值漂移
 - OI象限 / 近1小时OI变化率 / 大户多空比：`signal_score.py` 直接查
@@ -770,6 +774,7 @@ tail -20 /opt/btc-trader/logs/git_sync.log
 | 2026-07-13 | 任务卡7N：信号引擎循证校准+每轮遥测落库+ETF缓存——阈值±60→±25、迟滞带±40→±15（循证依据：signal_scores 9日54样本区间[-16,+33]、|分|≥40零次；引擎日志218样本mean=13.0/std=7.1/p95=25/max=27，±60对LONG≈6.6σ实证不可达，±25≈p95，配迟滞+90分钟冷却预估1-4信号/日，30终态样本约2-5周）；新增engine_scores遥测表(每轮成功评分落一行，跳过轮不写，与signal_scores严格分离防污染简报环比)；ETF维度进程内1小时TTL缓存(此前每5分钟全量爬双源288次/天有封IP风险，缓存过期且实取失败仍宁缺勿假跳过)；新阈值冻结至engine_signals累积≥30个终态样本；顺带订正采集服务真实路径monitor/binance_data_service.py(文档此前误写services/btc_binance_data_service.py) |
 | 2026-07-13 | Bug#36：ETF 12:00确认推送(etf_confirm_push.py)三重失效——(1)cron时区错配：系统时区Asia/Shanghai，cron行"0 4 * * 2-6"的注释按UTC假设(=北京12:00)，实际按本地时区在北京04:00触发，正是披露窗口开启时刻；(2)零执行迹象：cron自2026-07-02装入后7+次调度机会，logs/etf_confirm_push.log从未被创建；(3)v1设计从SQLite etf_flow表/morning_brief_cache.json读数但从无代码写入过这两处，v1从未真正出过数据(v2已改调真实fetch_etf_flows，但因(1)(2)未证实跑过)；处置：cron行删除，脚本与utils/etf_timing.py(仅注释引用零代码引用)一并git rm退役归档/root/btc-deploy/retired/，功能由7M正午简报整体取代 |
 | 2026-07-13 | 任务卡7M：正午简报+早盘去ETF+ETF稳定视图+cron清退——新增noon会话(周二至周六SGT12:00即UTC04:00，run_daily days=(2,3,4,5,6)按PTB v22.8实测约定0=周日6=周六，7节结构，max_tokens=2500，WP标题"BTC 正午简报·时间")；morning拆独立分支去ETF节13→12节(DATA块ETF段换单行提示，综合信号分ETF维度标注稳定数据日)，morning_monday独立分支原13节逐字节保留(V9源码diff零差异，待7P整体替换)；ETF稳定视图：etf_data.py v5新增stable_flow_m/stable_date返回字段(is_settling=False时落state持久化，修正state整体覆盖写bug)，signal_score._score_etf单日分量只用stable值(缺失→记0+etf_source=missing标注)，signal_engine stable缺失时宁缺勿假跳过本轮(7N的1小时ETF缓存保留，stable字段随缓存)；publisher收窄解禁(Sea补充裁定)：publish_briefing仅新增可选session_title参数，默认None标题行为与既往完全一致(V11实测验证)，仅noon调用点传"正午简报"(V10实测验证)；已知副作用已注释入码：ETF维度每日12:00后阶跃、周累计分量仍含披露窗口内阶段值(残余≤10综合分点待裁定) |
+| 2026-07-13 | 任务卡7M-2：ETF稳定视图补全累计口径——消除7M遗留的周累计残余(披露窗口内total_week混入当日阶段值，最大≈10综合分点，±25新阈值下足以误触发)；etf_data.py v6新增stable_week_m(实现选①逐日行按日期<=stable_date区间求和，parsed本就是逐日行无需等价算法；周初边界stable_date属上周时区间为空和为0天然非负；月累计不参与评分不加stable_month_m)；signal_score._score_etf周分量改用stable_week_m(缺失→该分量按0计)，detail_json增记etf_week_source(stable/realtime/missing)与etf_stable_week_m；引擎零改动(7N缓存的是fetch结果整体，stable_week_m随缓存自动生效)；简报正文周/月累计展示保持实时口径；V1实测重启前后etf_s均43.0且非窗口期stable_week_m==total_week数值恒等 |
 
 ### 路线图（7系列，本表未覆盖的更早阶段详见上表）
 - [x] 7A / 7A-2 / 7A-3：简报综合信号分代码化 + 14档三因子映射 + Markdown清洗
@@ -792,6 +797,8 @@ tail -20 /opt/btc-trader/logs/git_sync.log
 - [x] 7M：正午简报noon(周二至周六12:00，ETF确认+亚盘复盘) + 早盘去ETF节
   (13→12节) + ETF稳定视图(量化评分只用已确认完整交易日数据) +
   etf_confirm_push/etf_timing退役(Bug#36)
+- [x] 7M-2：ETF稳定视图补全累计口径（stable_week_m，单日+累计全口径，
+  消除披露窗口内周分量阶段值残余）
 
 ---
 

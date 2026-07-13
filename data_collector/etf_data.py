@@ -20,6 +20,11 @@ v5 更新（2026-07-13 任务卡7M，ETF稳定视图）：
   所有量化评分（signal_score/signal_engine）只用这两个字段，披露窗口内的
   阶段性数值只供简报正文展示
 - 修正 state 文件整体覆盖写问题（原 newly_published 写入会清掉其他键）
+v6 更新（2026-07-13 任务卡7M-2，稳定视图补全累计口径）：
+- 返回dict新增 stable_week_m：截至 stable_date 的本周累计（逐日行区间求和，
+  无需state持久化，每次fetch重算）；披露窗口内量化评分的周分量不再混入
+  当日阶段值。total_week/total_month 保持实时口径供简报正文展示。
+  月累计不参与评分，不加 stable_month_m
 """
 import os
 import json
@@ -336,6 +341,30 @@ def _build_result(parsed: list, source_note: str, cross_validated: bool) -> dict
         if r["date"].year == latest_date.year and r["date"].month == latest_date.month
     )
 
+    # ── 7M-2 稳定周累计：量化评分的周分量也纳入稳定口径 ──
+    # 实现选任务卡的优先级①"逐日行按 日期<=stable_date 求和"——parsed 本身
+    # 就是逐日行列表，直接区间求和可得，无需②"实时累计-当日阶段值"等价算法。
+    # is_settling=False：区间与 total_week 完全相同（week_mon..latest），数值恒等；
+    # is_settling=True：只加到 stable_date 为止，当日披露窗口内的阶段值不进入。
+    # 周初边界（显式处理）：settling 时 stable_date 可能属于上一周（如周二
+    # 早晨，本周尚无已确认交易日），区间 week_mon..stable_date 为空 → 和为0；
+    # 逐日区间求和天然不会为负，0 就是"本周稳定口径累计"的正确取值而非异常。
+    # stable_date 缺失（首次部署无state）→ None，评分侧按该分量缺数处理。
+    # 月累计不参与评分（_score_etf 只用单日+周），不加 stable_month_m。
+    if not is_settling:
+        stable_week_m = total_week
+    elif stable_date:
+        try:
+            _stable_d = datetime.strptime(stable_date, "%Y-%m-%d").date()
+            stable_week_m = sum(
+                r["flow"].get("Total", 0) for r in parsed
+                if week_mon <= r["date"] <= _stable_d
+            )
+        except Exception:
+            stable_week_m = None
+    else:
+        stable_week_m = None
+
     streak, streak_dir = 0, ("净流入" if total_latest >= 0 else "净流出")
     for row in reversed(parsed):
         val = row["flow"].get("Total", 0)
@@ -380,6 +409,7 @@ def _build_result(parsed: list, source_note: str, cross_validated: bool) -> dict
         "total_month":       total_month,
         "stable_flow_m":     stable_flow_m,   # 7M：最近已确认完整交易日净流(百万美元)
         "stable_date":       stable_date,     # 7M：对应日期字符串（可能为None）
+        "stable_week_m":     stable_week_m,   # 7M-2：截至stable_date的本周累计(百万美元)
         "streak_days":       streak,
         "streak_dir":        streak_dir,
         "signal":            signal,
