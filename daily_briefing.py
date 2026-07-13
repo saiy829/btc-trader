@@ -1,6 +1,7 @@
 """
 BTC AI 每日简报系统 v8
-会话：morning / morning_monday / noon / europe / evening / ondemand（noon为7M新增）
+会话：morning / weekly / noon / europe / evening / ondemand
+（noon为7M新增；weekly为7P新增，周一09:30自动路由，取代已退役的morning_monday）
 数据：IB(60min+30min观察) + VP(POC/VAH/VAL) + ETF + CME缺口 + 现货 + CB溢价
 
 v8 新增：
@@ -23,7 +24,7 @@ logger = setup_logger("daily-briefing")
 
 SESSION_NAMES = {
     "morning":         "早盘简报·当日交易计划",
-    "morning_monday":  "周一早盘简报·当日交易计划（含CME专项）",
+    "weekly":          "周报·上周复盘与下周展望",       # 7P新增，周一 SGT 09:30（取代morning_monday）
     "noon":            "正午简报·ETF确认与亚盘复盘",   # 7M新增，周二至周六 SGT 12:00
     "europe":          "欧盘简报·策略更新",
     "evening":         "美盘简报·NY Kill Zone方案",
@@ -87,9 +88,10 @@ def build_header(binance, mf, extras, session) -> str:
 
 
 def run(session: str = "ondemand"):
+    # 7P：周一 09:30 的 morning 自动路由为 weekly 周报（morning_monday 已退役）
     if session == "morning" and _is_monday():
-        session = "morning_monday"
-        logger.info("检测到周一，升级为 morning_monday 会话")
+        session = "weekly"
+        logger.info("检测到周一，morning 路由为 weekly 周报会话（7P）")
     logger.info("=" * 50)
     logger.info(f"BTC AI 简报 v8 | {SESSION_NAMES.get(session, session)}")
     logger.info("=" * 50)
@@ -161,6 +163,18 @@ def run(session: str = "ondemand"):
         except Exception as _atas_e:
             logger.warning(f"      ATAS 数据跳过: {_atas_e}")
             binance["atas_ctx"] = ""
+
+        # 7P：weekly 会话注入周数据聚合块（W1-W10）。独立 try/except：
+        # 失败降级为 morning 等价数据继续生成（weekly_ctx 为空时 prompt 侧
+        # 有兜底提示），日志记 ERROR
+        if session == "weekly":
+            try:
+                from briefing.weekly_briefing_data import get_weekly_context
+                binance["weekly_ctx"] = get_weekly_context()
+                logger.info("      周报数据块已载入（W1-W10）")
+            except Exception as _wk_e:
+                logger.error(f"      周报数据块生成失败，降级为常规数据继续: {_wk_e}")
+                binance["weekly_ctx"] = ""
         # ───────────────────────────────────────────────────────────────────
 
         logger.info(f"[6/7] Claude AI 分析中 [{session}]...")
@@ -171,10 +185,12 @@ def run(session: str = "ondemand"):
         tg_ok = send(full_msg)
         if tg_ok:
             logger.info("OK - Telegram 发送成功")
-        # 7M：仅 noon 传 session_title（WP标题带"正午简报"字样），其余 session
+        # 7M/7P：noon/weekly 传 session_title（WP标题带会话名），其余 session
         # 不传参，标题维持"BTC 交易简报·时间"与既往完全一致（Sea收窄裁定）
         if session == "noon":
             wp_link = publish_briefing(briefing, binance, extras, session_title="正午简报")
+        elif session == "weekly":
+            wp_link = publish_briefing(briefing, binance, extras, session_title="周报")
         else:
             wp_link = publish_briefing(briefing, binance, extras)
         if wp_link:

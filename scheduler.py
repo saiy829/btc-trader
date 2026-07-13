@@ -72,7 +72,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"BTC AI 系统运行中\n"
         f"时间：{sgt}\n"
         f"─────────────────\n"
-        f"早盘简报：每天 SGT 09:30\n"
+        f"早盘简报：周二至周日 SGT 09:30\n"
+        f"周报　　：周一 SGT 09:30\n"
         f"正午简报：周二至周六 SGT 12:00\n"
         f"欧盘简报：每天 SGT 15:00\n"
         f"美盘简报：每天 SGT 20:30\n"
@@ -109,7 +110,8 @@ async def post_init(application: Application) -> None:
             chat_id=CHAT_ID,
             text=(
                 "[OK] BTC AI 调度系统 v3 已启动\n"
-                "早盘简报：每天 SGT 09:30（IB+CME缺口，ETF移至正午）\n"
+                "早盘简报：周二至周日 SGT 09:30\n"
+                "周报：周一 SGT 09:30（上周复盘+下周展望，7P）\n"
                 "正午简报：周二至周六 SGT 12:00（ETF确认+亚盘复盘）\n"
                 "欧盘简报：每天 SGT 15:00（伦敦开盘）\n"
                 "美盘简报：每天 SGT 20:30（NY Kill Zone前）\n"
@@ -130,7 +132,7 @@ def main():
     # ─────────────────────────────────────────────────────────────
     logger.info("=" * 50)
     logger.info("BTC AI 调度系统 v3 启动")
-    logger.info("早盘：UTC 01:30（SGT 09:30）")
+    logger.info("早盘：UTC 01:30（SGT 09:30）周一自动路由为周报(7P)")
     logger.info("正午：UTC 04:00（SGT 12:00）周二至周六")
     logger.info("欧盘：UTC 07:00（SGT 15:00）")
     logger.info("美盘：UTC 12:30（SGT 20:30）")
