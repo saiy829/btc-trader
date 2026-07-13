@@ -211,6 +211,13 @@ def compute_current_score():
     if not etf or not etf.get("has_data"):
         logger.warning("跳过本轮：ETF数据完全不可用（has_data=False）")
         return None
+    # 7M ETF稳定视图：引擎侧宁缺勿假——已确认完整交易日的数据（stable_flow_m）
+    # 还没有记录时直接跳过本轮，不像简报侧那样按0分降级。stable字段随7N的
+    # 1小时缓存整体缓存，逻辑自洽；正常情况下部署后第一次成功取数就会有值。
+    if etf.get("stable_flow_m") is None:
+        logger.warning("跳过本轮：ETF稳定视图暂无记录（etf_source=missing，宁缺勿假）")
+        return None
+    logger.info(f"ETF稳定视图：数据日{etf.get('stable_date')}（etf_source=stable）")
 
     try:
         extras = get_spot_and_extras()

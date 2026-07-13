@@ -1,6 +1,6 @@
 """
 BTC AI 调度系统 v3（完整版）
-三个定时任务：早盘/欧盘/美盘 + /b 命令随时触发
+四个定时任务：早盘/正午(周二至周六,7M新增)/欧盘/美盘 + /b 命令随时触发
 """
 import asyncio
 from datetime import time as dt_time, timezone
@@ -24,6 +24,17 @@ async def job_morning(context):
     logger.info("定时触发：早盘简报 SGT 09:30")
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, run_briefing, "morning")
+
+
+async def job_noon(context):
+    """UTC 04:00（SGT 12:00）正午简报，周二至周六（7M新增）"""
+    # 首行记录当前北京时间+星期名，供首次自动触发时人工核对
+    # run_daily 的 days 编号约定是否正确（PTB v22.8：0=周日…6=周六）
+    now_bj = now_sgt()
+    weekday_cn = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][now_bj.weekday()]
+    logger.info(f"定时触发：正午简报 | 当前北京时间 {now_bj.strftime('%Y-%m-%d %H:%M')} {weekday_cn}")
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, run_briefing, "noon")
 
 
 async def job_europe(context):
@@ -62,6 +73,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"时间：{sgt}\n"
         f"─────────────────\n"
         f"早盘简报：每天 SGT 09:30\n"
+        f"正午简报：周二至周六 SGT 12:00\n"
         f"欧盘简报：每天 SGT 15:00\n"
         f"美盘简报：每天 SGT 20:30\n"
         f"─────────────────\n"
@@ -97,7 +109,8 @@ async def post_init(application: Application) -> None:
             chat_id=CHAT_ID,
             text=(
                 "[OK] BTC AI 调度系统 v3 已启动\n"
-                "早盘简报：每天 SGT 09:30（IB+ETF+CME缺口）\n"
+                "早盘简报：每天 SGT 09:30（IB+CME缺口，ETF移至正午）\n"
+                "正午简报：周二至周六 SGT 12:00（ETF确认+亚盘复盘）\n"
                 "欧盘简报：每天 SGT 15:00（伦敦开盘）\n"
                 "美盘简报：每天 SGT 20:30（NY Kill Zone前）\n"
                 "发送 /b 可随时触发实时简报"
@@ -118,6 +131,7 @@ def main():
     logger.info("=" * 50)
     logger.info("BTC AI 调度系统 v3 启动")
     logger.info("早盘：UTC 01:30（SGT 09:30）")
+    logger.info("正午：UTC 04:00（SGT 12:00）周二至周六")
     logger.info("欧盘：UTC 07:00（SGT 15:00）")
     logger.info("美盘：UTC 12:30（SGT 20:30）")
     logger.info("=" * 50)
@@ -137,11 +151,21 @@ def main():
         cmd_briefing
     ))
 
-    # ── 三个定时任务（UTC时间）───────────────────────────────────
+    # ── 四个定时任务（UTC时间）───────────────────────────────────
     app.job_queue.run_daily(
         job_morning,
         time=dt_time(1, 30, 0, tzinfo=UTC),   # UTC 01:30 = SGT 09:30
         name="morning_briefing"
+    )
+    app.job_queue.run_daily(
+        job_noon,
+        time=dt_time(4, 0, 0, tzinfo=UTC),    # UTC 04:00 = SGT 12:00
+        # PTB v22.8 约定（已读安装库源码 docstring 确认）：days 0-6 对应
+        # sunday-saturday，即 0=周日 1=周一 2=周二 3=周三 4=周四 5=周五 6=周六
+        # （v20.0 起从"0=周一"改成了"0=周日"，禁止凭旧记忆填写）
+        # (2,3,4,5,6) = 周二至周六：美股周一~周五收盘后次日北京中午确认ETF
+        days=(2, 3, 4, 5, 6),
+        name="noon_briefing"
     )
     app.job_queue.run_daily(
         job_europe,
@@ -154,7 +178,7 @@ def main():
         name="evening_briefing"
     )
 
-    logger.info("三个定时任务已注册")
+    logger.info("四个定时任务已注册（含正午简报 周二至周六）")
     logger.info("Bot 开始监听命令...")
     app.run_polling(drop_pending_updates=True)
 

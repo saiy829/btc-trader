@@ -389,10 +389,16 @@ def _get_or_create_category(name):
     except Exception: return "1"
 
 
-def publish_briefing(briefing_text, binance_data, extras=None):
+def publish_briefing(briefing_text, binance_data, extras=None, session_title=None):
+    # 7M 收窄解禁（Sea 2026-07-13 补充裁定）：仅新增可选参数 session_title，
+    # 默认 None 时标题与既往完全一致；有值时嵌入会话名（目前仅 noon 传入
+    # "正午简报"）。着色引擎/Header Card/分类等其余逻辑维持禁改。
     try:
         now     = now_sgt()
-        title   = f"BTC 交易简报 · {now.strftime('%Y-%m-%d %H:%M')}"
+        if session_title:
+            title = f"BTC {session_title} · {now.strftime('%Y-%m-%d %H:%M')}"
+        else:
+            title = f"BTC 交易简报 · {now.strftime('%Y-%m-%d %H:%M')}"
         content = _to_html(briefing_text, binance_data, extras or {})
         cat_id  = _get_or_create_category("每日简报")
         logger.info(f"发布: {title}")

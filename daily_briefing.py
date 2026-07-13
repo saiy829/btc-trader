@@ -1,6 +1,6 @@
 """
 BTC AI 每日简报系统 v8
-会话：morning / morning_monday / europe / evening / ondemand
+会话：morning / morning_monday / noon / europe / evening / ondemand（noon为7M新增）
 数据：IB(60min+30min观察) + VP(POC/VAH/VAL) + ETF + CME缺口 + 现货 + CB溢价
 
 v8 新增：
@@ -24,6 +24,7 @@ logger = setup_logger("daily-briefing")
 SESSION_NAMES = {
     "morning":         "早盘简报·当日交易计划",
     "morning_monday":  "周一早盘简报·当日交易计划（含CME专项）",
+    "noon":            "正午简报·ETF确认与亚盘复盘",   # 7M新增，周二至周六 SGT 12:00
     "europe":          "欧盘简报·策略更新",
     "evening":         "美盘简报·NY Kill Zone方案",
     "ondemand":        "实时快速简报",
@@ -145,9 +146,14 @@ def run(session: str = "ondemand"):
             binance["market_meta"] = {}                          # ← v8 新增
 
         # ATAS 订单流数据（AtasBridge.dll 本地推送，STALE > 30min 自动跳过）
+        # 7M：noon 显式传4小时窗口（08:00-12:00亚盘复盘口径）；其余 session
+        # 维持无参调用（get_atas_context 默认值本就是 hours=4，行为不变）
         try:
             from briefing.atas_briefing_data import get_atas_context
-            binance["atas_ctx"] = get_atas_context()
+            if session == "noon":
+                binance["atas_ctx"] = get_atas_context(hours=4)
+            else:
+                binance["atas_ctx"] = get_atas_context()
             if binance["atas_ctx"]:
                 logger.info("      ATAS 订单流数据已载入（Delta/CVD/POC/大单）")
             else:
@@ -165,7 +171,12 @@ def run(session: str = "ondemand"):
         tg_ok = send(full_msg)
         if tg_ok:
             logger.info("OK - Telegram 发送成功")
-        wp_link = publish_briefing(briefing, binance, extras)
+        # 7M：仅 noon 传 session_title（WP标题带"正午简报"字样），其余 session
+        # 不传参，标题维持"BTC 交易简报·时间"与既往完全一致（Sea收窄裁定）
+        if session == "noon":
+            wp_link = publish_briefing(briefing, binance, extras, session_title="正午简报")
+        else:
+            wp_link = publish_briefing(briefing, binance, extras)
         if wp_link:
             logger.info(f"OK - WordPress: {wp_link}")
             send(f"[WP] {SESSION_NAMES.get(session,'')} 已发布\n{wp_link}")

@@ -14,6 +14,12 @@ v4 更新：
 - 改为按"当日更新时间窗口"判断：北京时间 04:00（美股收盘）-12:00（各发行商基本披露完）
   期间的当日最新数据标记为 is_settling=True（阶段性数值），12:00后视为已稳定
 - 新增字段 is_settling / completeness_note，供简报 prompt 和仪表板直接展示
+v5 更新（2026-07-13 任务卡7M，ETF稳定视图）：
+- 返回dict新增 stable_flow_m / stable_date：最近一个已确认完整交易日
+  （is_settling=False 时确认）的净流量与日期，靠 state 文件跨进程持久化；
+  所有量化评分（signal_score/signal_engine）只用这两个字段，披露窗口内的
+  阶段性数值只供简报正文展示
+- 修正 state 文件整体覆盖写问题（原 newly_published 写入会清掉其他键）
 """
 import os
 import json
@@ -290,12 +296,36 @@ def _build_result(parsed: list, source_note: str, cross_validated: bool) -> dict
         completeness_note = "✅ 当前为已稳定数据"
 
     # 今日首次更新判断（跨 session 状态追踪）
+    # 7M 修正：原来这里 _save_state({"last_reported_date": ...}) 是整体覆盖写，
+    # 会清掉 state 里的其他键——改为读-改-写，保留全部键（稳定视图键靠这个活着）
     state = _load_state()
     last_reported = state.get("last_reported_date", "")
     date_iso = latest_date.isoformat()
     newly_published = (date_iso > last_reported) if last_reported else True
+    state_dirty = False
     if newly_published:
-        _save_state({"last_reported_date": date_iso})
+        state["last_reported_date"] = date_iso
+        state_dirty = True
+
+    # ── 7M ETF稳定视图：记录/读取"最近一个已确认完整交易日"的净流量 ──
+    # is_settling=False 时当期值就是稳定值，落进 state；is_settling=True
+    # （北京04:00-12:00披露窗口内的新鲜数据）不落，改从 state 读上一稳定值。
+    # 量化评分（signal_score/signal_engine）只用 stable_* 字段，窗口内的
+    # 阶段性数值只给简报正文展示用。首次部署 state 无记录时 stable_* 为
+    # None，评分侧按"数据缺失"处理（简报记0分/引擎跳过本轮，宁缺勿假）。
+    if not is_settling:
+        if state.get("stable_flow_m") != total_latest or state.get("stable_date") != date_iso:
+            state["stable_flow_m"] = total_latest
+            state["stable_date"]   = date_iso
+            state_dirty = True
+        stable_flow_m = total_latest
+        stable_date   = date_iso
+    else:
+        stable_flow_m = state.get("stable_flow_m")
+        stable_date   = state.get("stable_date")
+
+    if state_dirty:
+        _save_state(state)
 
     week_mon = latest_date - timedelta(days=latest_date.weekday())
     total_week = sum(
@@ -348,6 +378,8 @@ def _build_result(parsed: list, source_note: str, cross_validated: bool) -> dict
         "total_yest":        total_latest,
         "total_week":        total_week,
         "total_month":       total_month,
+        "stable_flow_m":     stable_flow_m,   # 7M：最近已确认完整交易日净流(百万美元)
+        "stable_date":       stable_date,     # 7M：对应日期字符串（可能为None）
         "streak_days":       streak,
         "streak_dir":        streak_dir,
         "signal":            signal,
