@@ -25,6 +25,14 @@ v6 更新（2026-07-13 任务卡7M-2，稳定视图补全累计口径）：
   无需state持久化，每次fetch重算）；披露窗口内量化评分的周分量不再混入
   当日阶段值。total_week/total_month 保持实时口径供简报正文展示。
   月累计不参与评分，不加 stable_month_m
+v7 更新（2026-07-22 稳定视图无状态化修复）：
+- stable_flow_m / stable_date 改为每次从 parsed 逐日行直接推导（确认日=
+  非披露窗口时parsed[-1]、披露窗口时parsed[-2]），不再依赖 etf_state.json
+  持久化。修复原设计"稳定键只在窗口外写、窗口内只读，一旦state被并发写
+  损坏就到12:00才自愈"的单点故障（实测曾致信号引擎在披露窗口内持续跳过
+  3.5小时）。正常日推导值与原state存值完全一致，不改变评分行为。
+- _save_state 改原子写（pid临时文件+os.replace），消除并发半截写损坏。
+- state 现仅承载 last_reported_date（"今日首发"判断），不再是评分单点依赖。
 """
 import os
 import json
@@ -80,10 +88,18 @@ def _load_state() -> dict:
 
 
 def _save_state(state: dict) -> None:
+    # 2026-07-22 修复：原来直接 open(STATE_FILE,"w") 是非原子写，而本文件被
+    # signal_engine/各简报/weekly 多个进程并发调用，一次半截写会让并发的
+    # _load_state() 读到无效JSON→返回{}，进而丢键。改为"写pid私有临时文件
+    # + os.replace 原子替换"：任何读者要么看到旧的完整文件、要么看到新的
+    # 完整文件，永不出现半截状态。pid 后缀确保多进程各写各的临时文件，
+    # 不会互相截断（os.replace 在同一文件系统上是原子 rename）。
     try:
         os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
-        with open(STATE_FILE, "w") as f:
+        tmp = f"{STATE_FILE}.tmp.{os.getpid()}"
+        with open(tmp, "w") as f:
             json.dump(state, f)
+        os.replace(tmp, STATE_FILE)
     except Exception as e:
         logger.warning(f"ETF 状态文件写入失败: {e}")
 
@@ -300,37 +316,44 @@ def _build_result(parsed: list, source_note: str, cross_validated: bool) -> dict
     else:
         completeness_note = "✅ 当前为已稳定数据"
 
-    # 今日首次更新判断（跨 session 状态追踪）
-    # 7M 修正：原来这里 _save_state({"last_reported_date": ...}) 是整体覆盖写，
-    # 会清掉 state 里的其他键——改为读-改-写，保留全部键（稳定视图键靠这个活着）
+    # 今日首次更新判断（跨 session 状态追踪）。state 现在只承载
+    # last_reported_date 这一个用途（"今日首发"标记），稳定视图不再依赖它。
     state = _load_state()
     last_reported = state.get("last_reported_date", "")
     date_iso = latest_date.isoformat()
     newly_published = (date_iso > last_reported) if last_reported else True
-    state_dirty = False
     if newly_published:
         state["last_reported_date"] = date_iso
-        state_dirty = True
+        _save_state(state)   # 原子写（见 _save_state）
 
-    # ── 7M ETF稳定视图：记录/读取"最近一个已确认完整交易日"的净流量 ──
-    # is_settling=False 时当期值就是稳定值，落进 state；is_settling=True
-    # （北京04:00-12:00披露窗口内的新鲜数据）不落，改从 state 读上一稳定值。
-    # 量化评分（signal_score/signal_engine）只用 stable_* 字段，窗口内的
-    # 阶段性数值只给简报正文展示用。首次部署 state 无记录时 stable_* 为
-    # None，评分侧按"数据缺失"处理（简报记0分/引擎跳过本轮，宁缺勿假）。
+    # ── ETF稳定视图（7M/7M-2；2026-07-22 重构为无状态推导）─────────────
+    # "最近一个已确认完整交易日" = parsed 里除去"当前仍在披露窗口内的当日"
+    # 之后最新的那一行：
+    #   is_settling=True  → 当日(parsed[-1])是阶段值，确认日取 parsed[-2]
+    #   is_settling=False → 当日本身已确认，确认日取 parsed[-1]
+    # parsed 是按日期升序的完整历史逐日行，parsed[-2] 天然就是上一交易日
+    # （周末间隔也正确，如周一的上一确认日=上周五）。
+    #
+    # 【为何改掉原设计】原来稳定值存在 data/etf_state.json，且"只在窗口外写、
+    # 窗口内只读"——一旦该文件在窗口内被并发写损坏（非原子写），稳定键蒸发
+    # 后要等到12:00窗口外才自愈，期间 ETF 维度→missing→引擎宁缺勿假整轮跳过
+    # （2026-07-22 实测：引擎在窗口内静默了3.5小时）。改为每次从 parsed 直接
+    # 推导后，稳定值不再依赖任何持久化状态，天然免疫该故障；正常健康日推导值
+    # 与原 state 存的值完全一致（都是"上一确认日"），不改变评分行为。
+    # 确认日不可得（parsed 只有1行且在窗口内）→ stable_* 为 None，评分侧仍按
+    # "数据缺失"处理（简报记0分/引擎跳过本轮，宁缺勿假）。
     if not is_settling:
-        if state.get("stable_flow_m") != total_latest or state.get("stable_date") != date_iso:
-            state["stable_flow_m"] = total_latest
-            state["stable_date"]   = date_iso
-            state_dirty = True
-        stable_flow_m = total_latest
-        stable_date   = date_iso
+        _confirmed = parsed[-1]
+    elif len(parsed) >= 2:
+        _confirmed = parsed[-2]
     else:
-        stable_flow_m = state.get("stable_flow_m")
-        stable_date   = state.get("stable_date")
-
-    if state_dirty:
-        _save_state(state)
+        _confirmed = None
+    if _confirmed is not None:
+        stable_flow_m = _confirmed["flow"].get("Total", 0)
+        stable_date   = _confirmed["date"].isoformat()
+    else:
+        stable_flow_m = None
+        stable_date   = None
 
     week_mon = latest_date - timedelta(days=latest_date.weekday())
     total_week = sum(

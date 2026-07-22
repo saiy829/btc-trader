@@ -473,7 +473,7 @@ ETF流向25% / 资金费率Z-score15% / OI象限20% / 大户多空比15% / CB溢
   stable_week_m单独缺失→仅该分量按0计+etf_week_source=missing。
   detail_json溯源字段：etf_source、etf_stable_date、etf_week_source
   （stable/realtime/missing）。已知副作用（Sea裁定正确性优先）：该维从
-  连续更新变为每日12:00后阶跃一次（7M时周分量的阶段值残余已由7M-2消除）
+  连续更新变为每日12:00后阶跃一次（7M时周分量的阶段值残余已由7M-2消除）。**2026-07-22 无状态化修复（Bug#37）**：stable_flow_m/stable_date 改为每次从 parsed 逐日行推导（确认日=非窗口parsed[-1]/窗口内parsed[-2]），不再依赖 etf_state.json；原设计"稳定键只窗口外写、窗口内只读"遇 state 被并发非原子写损坏时会到12:00才自愈，期间引擎宁缺勿假整轮跳过（实测停摆3.5h）
 - 资金费率Z-score：复用 `binance_briefing_data.get_market_meta()["fr_zscore"]`，
   不重新计算，避免和其他地方显示的 Z 值数值漂移
 - OI象限 / 近1小时OI变化率 / 大户多空比：`signal_score.py` 直接查
@@ -797,6 +797,7 @@ tail -20 /opt/btc-trader/logs/git_sync.log
 | 2026-07-13 | 任务卡7M：正午简报+早盘去ETF+ETF稳定视图+cron清退——新增noon会话(周二至周六SGT12:00即UTC04:00，run_daily days=(2,3,4,5,6)按PTB v22.8实测约定0=周日6=周六，7节结构，max_tokens=2500，WP标题"BTC 正午简报·时间")；morning拆独立分支去ETF节13→12节(DATA块ETF段换单行提示，综合信号分ETF维度标注稳定数据日)，morning_monday独立分支原13节逐字节保留(V9源码diff零差异，待7P整体替换)；ETF稳定视图：etf_data.py v5新增stable_flow_m/stable_date返回字段(is_settling=False时落state持久化，修正state整体覆盖写bug)，signal_score._score_etf单日分量只用stable值(缺失→记0+etf_source=missing标注)，signal_engine stable缺失时宁缺勿假跳过本轮(7N的1小时ETF缓存保留，stable字段随缓存)；publisher收窄解禁(Sea补充裁定)：publish_briefing仅新增可选session_title参数，默认None标题行为与既往完全一致(V11实测验证)，仅noon调用点传"正午简报"(V10实测验证)；已知副作用已注释入码：ETF维度每日12:00后阶跃、周累计分量仍含披露窗口内阶段值(残余≤10综合分点待裁定) |
 | 2026-07-13 | 任务卡7M-2：ETF稳定视图补全累计口径——消除7M遗留的周累计残余(披露窗口内total_week混入当日阶段值，最大≈10综合分点，±25新阈值下足以误触发)；etf_data.py v6新增stable_week_m(实现选①逐日行按日期<=stable_date区间求和，parsed本就是逐日行无需等价算法；周初边界stable_date属上周时区间为空和为0天然非负；月累计不参与评分不加stable_month_m)；signal_score._score_etf周分量改用stable_week_m(缺失→该分量按0计)，detail_json增记etf_week_source(stable/realtime/missing)与etf_stable_week_m；引擎零改动(7N缓存的是fetch结果整体，stable_week_m随缓存自动生效)；简报正文周/月累计展示保持实时口径；V1实测重启前后etf_s均43.0且非窗口期stable_week_m==total_week数值恒等 |
 | 2026-07-13 | 任务卡7P：周报体系+morning_monday退役——新建briefing/weekly_briefing_data.py周数据聚合模块(W1-W10权威数据块，周边界=周一北京08:00，每块独立容错宁缺勿假；W6交易日分组用SQLite date()把ISO+08:00转UTC日期恰等于08:00日界)；briefing.py删morning_monday分支(V6实测morning/noon/europe/evening/ondemand五分支与备份零差异)原位换weekly 12节分支(MAX_TOKENS 8192)；daily_briefing.py周一路由morning→weekly、SESSION_NAMES换键、weekly注入get_weekly_context()(失败降级继续+ERROR日志)、WP标题传session_title=周报；实测：周报6084字end_turn 12节齐全(W4象限占比合计100.0%、W2逐日5行、W6每日Delta 7行、W9引擎段全库终态0/30容错文案)；顺带发现既有问题：morning本体9412字撞8192上限stop_reason=max_tokens截尾(非7P引入，morning分支零改动，留待后续卡处理)；F&G文档不符已订正(实情：7P前代码无任何F&G采集点) |
+| 2026-07-22 | Bug#37：ETF稳定视图state单点故障——7M/7M-2的stable_flow_m/stable_date存在data/etf_state.json，且"只在is_settling=False(披露窗口外)写、窗口内只读"；_save_state非原子写(open+dump)且被signal_engine/各简报/weekly多进程并发调用，一次半截写→_load_state读到无效JSON返回{}→丢稳定键；键在披露窗口(北京04-12)内丢失后要等12:00窗口外才自愈，期间ETF维度→missing→信号引擎宁缺勿假整轮跳过(2026-07-22实测停摆3.5h、engine_scores断档)。修复(仅改data_collector/etf_data.py)：①稳定值改为每次从parsed逐日行推导(确认日=非窗口parsed[-1]/窗口内parsed[-2])彻底去掉state依赖，正常日推导值与原state存值完全一致不改评分；②_save_state改pid临时文件+os.replace原子写。实测修复后引擎当场恢复出分(etf_source=stable/数据日2026-07-20)，_score_etf得78分非缺失，signal_scores未被污染 |
 
 ### 路线图（7系列，本表未覆盖的更早阶段详见上表）
 - [x] 7A / 7A-2 / 7A-3：简报综合信号分代码化 + 14档三因子映射 + Markdown清洗
