@@ -510,6 +510,16 @@ def _sleep_until_next_cycle():
 
 def run_cycle(state: EngineState):
     logger.info("── 新一轮采集 ──")
+
+    # 结果跟踪先跑、且无条件每轮执行（2026-07-22 修复）。
+    # check_outcomes() 只依赖"当前价"（自己取 Binance ticker），与 ETF/评分
+    # 输入完全无关；原来它排在 compute_current_score() 的 `if result is None:
+    # return` 之后，导致任一评分输入缺失（如 ETF 稳定视图暂缺）就连带把已开
+    # 信号的止盈止损跟踪一起跳过——Bug#37 停摆期间 #29 打到 T2 却被漏记、
+    # 最终错记成止损亏损，就是这个耦合造成的。提到评分之前，确保任何评分
+    # 中断都只影响"发不发新信号"，绝不影响"盯不盯已有持仓"。
+    check_outcomes()
+
     result = compute_current_score()
     if result is None:
         return
@@ -521,8 +531,6 @@ def run_cycle(state: EngineState):
     direction = check_trigger(state, score)
     if direction:
         fire_signal(direction, result, state)
-
-    check_outcomes()
 
 
 def main():
