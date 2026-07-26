@@ -1679,7 +1679,7 @@ async def signal_history(days: int = 7):
 # ══════════════════════════════════════════════════════════════════
 
 @app.get("/api/market/structure")
-async def market_structure():
+def market_structure():  # 同步def：FastAPI自动丢线程池，避免footprint重算(~2.4s/新bar)阻塞事件循环
     """多时间框架市场结构快照（供 mb.661688.xyz 面板实时刷新）"""
     try:
         from briefing.market_structure import get_market_structure

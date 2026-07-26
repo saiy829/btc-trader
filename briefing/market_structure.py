@@ -34,6 +34,26 @@ def _conn():
     return c
 
 
+# footprint版VP要解析~2000根footprint(周窗口)，单次全量计算~3秒。bar每5分钟
+# 才更新，故按"最新bar时间戳"缓存整份结果：两次bar之间的所有轮询直接返回
+# 缓存，全量重算只在有新bar时发生(~每5分钟一次)，避免阻塞单worker的API。
+_CACHE = {"key": None, "data": None}
+# ETF为日粒度且fetch会爬Farside网站，单独加30分钟缓存，避免每根bar都去爬。
+_ETF_CACHE = {"ts": 0.0, "data": None}
+
+
+def _etf_cached():
+    import time as _t
+    if _ETF_CACHE["data"] is not None and _t.time() - _ETF_CACHE["ts"] < 1800:
+        return _ETF_CACHE["data"]
+    from data_collector.etf_data import fetch_etf_flows
+    e = fetch_etf_flows()
+    if e and e.get("has_data"):
+        _ETF_CACHE["ts"] = _t.time()
+        _ETF_CACHE["data"] = e
+    return e
+
+
 def _ep(iso):
     try:
         return datetime.fromisoformat(iso).timestamp()
@@ -41,13 +61,35 @@ def _ep(iso):
         return None
 
 
+def _bar_fp(b):
+    """惰性解析并缓存单根bar的footprint（逐档 price/volume/bid/ask）。"""
+    if "_fp" not in b:
+        try:
+            fp = json.loads(b["footprint_json"]) if b.get("footprint_json") else None
+            b["_fp"] = fp if fp else None
+        except Exception:
+            b["_fp"] = None
+    return b["_fp"]
+
+
 def _vp(bars, bucket=50.0):
-    """成交量分布 POC/VAH/VAL（70%价值区，与项目日VP同算法）"""
+    """
+    真·Volume Profile（成交量分布，非TPO）：按 footprint 逐档成交量在价格上聚合，
+    取 POC（成交量最大价位）+ 70% 价值区 VAH/VAL。这是"成交量在哪堆积"，
+    与基于时间的 TPO（Market Profile）是两回事。
+    极少数无 footprint 的bar退化为"bar典型价+总量"近似（覆盖<0.5%）。
+    """
     v = defaultdict(float)
     for b in bars:
-        if not b.get("volume"):
-            continue
-        v[round(((b["high"] + b["low"] + b["close"]) / 3) / bucket) * bucket] += b["volume"]
+        fp = _bar_fp(b)
+        if fp:
+            for lv in fp:
+                try:
+                    v[round(float(lv["price"]) / bucket) * bucket] += float(lv.get("volume", 0))
+                except Exception:
+                    continue
+        elif b.get("volume"):
+            v[round(((b["high"] + b["low"] + b["close"]) / 3) / bucket) * bucket] += b["volume"]
     if not v:
         return None
     tot = sum(v.values())
@@ -74,7 +116,23 @@ def _pos_pct(px, lo, hi):
 
 def get_market_structure() -> dict:
     now = datetime.now(BJT)
-    out = {"ts": now.strftime("%Y-%m-%d %H:%M:%S"), "generated_at": now.isoformat()}
+    # ── 缓存命中检查：最新bar未变则直接返回上次结果（避免3秒重算）──
+    try:
+        _cc = _conn()
+        _r = _cc.execute("SELECT MAX(timestamp) t FROM atas_bars "
+                         "WHERE exchange='binance' AND market_type='perp'").fetchone()
+        _cc.close()
+        cache_key = _r["t"] if _r else None
+    except Exception:
+        cache_key = None
+    if cache_key and _CACHE["key"] == cache_key and _CACHE["data"] is not None:
+        return _CACHE["data"]
+
+    out = {
+        "ts": now.strftime("%Y-%m-%d %H:%M:%S"), "generated_at": now.isoformat(),
+        "symbol": "币安 BTCUSDT 永续",            # 数据源交易对（AtasBridge binance/perp）
+        "vp_type": "Volume Profile（成交量分布，非TPO）",  # POC/VAH/VAL 口径明示
+    }
     c = _conn()
 
     # ── 币安永续 bar（已清洗）──────────────────────────────────────
@@ -177,11 +235,8 @@ def get_market_structure() -> dict:
             # 足迹吸收带（4H聚合，与 atas_briefing_data 同判据：比值>=2且量>=5）
             buk = defaultdict(lambda: {"bid": 0.0, "ask": 0.0})
             for b in H:
-                if not b["footprint_json"]:
-                    continue
-                try:
-                    lv = json.loads(b["footprint_json"])
-                except Exception:
+                lv = _bar_fp(b)
+                if not lv:
                     continue
                 for x in lv:
                     try:
@@ -253,9 +308,8 @@ def get_market_structure() -> dict:
     except Exception as e:
         out["macro"] = {"error": str(e)}
     try:
-        from data_collector.etf_data import fetch_etf_flows
-        e = fetch_etf_flows()
-        if e.get("has_data"):
+        e = _etf_cached()
+        if e and e.get("has_data"):
             out["macro"]["etf_stable_m"] = e.get("stable_flow_m")
             out["macro"]["etf_stable_date"] = e.get("stable_date")
             out["macro"]["etf_week_m"] = e.get("stable_week_m")
@@ -316,6 +370,9 @@ def get_market_structure() -> dict:
         out["levels_error"] = str(e)
 
     c.close()
+    if cache_key:
+        _CACHE["key"] = cache_key
+        _CACHE["data"] = out
     return out
 
 
