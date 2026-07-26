@@ -30,13 +30,14 @@ html.light {
 html,body{height:100%;background:var(--bg);color:var(--txt);font-family:var(--font-n);
   font-size:13px;overflow:hidden;-webkit-font-smoothing:antialiased;transition:background .25s,color .25s;}
 #app{display:grid;
-  grid-template-rows:64px 1fr 1fr auto auto 1fr;
+  grid-template-rows:64px 1fr 1fr auto auto auto 1fr;
   grid-template-columns:1fr 1fr 1fr 1fr;
   grid-template-areas:
     "hdr  hdr  hdr  hdr"
     "fund oi   ib   ib"
     "vp   mp   etf  etf"
     "cvd  cvd  cvd  cvd"
+    "mtf  mtf  mtf  mtf"
     "sig  sig  sig  sig"
     "liq  liq  stat stat";
   gap:6px;padding:6px;height:100vh;}
@@ -204,6 +205,43 @@ html,body{height:100%;background:var(--bg);color:var(--txt);font-family:var(--fo
 .sig-badge.mix{color:var(--warn);background:rgba(255,179,0,.18);}
 .sig-badge.flat{color:var(--txt3);background:var(--border);}
 .sig-badge.openb{color:var(--warn);background:rgba(255,179,0,.18);}
+
+/* ═══ MTF 多时间框架结构 ═════════════════════════════════════════ */
+.mtf-panel{grid-area:mtf;}
+.mtf-body{display:flex;flex-direction:column;gap:5px;padding:2px 0;}
+.mtf-tfs{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;}
+.mtf-tf{background:var(--card2);border-radius:5px;padding:5px 8px;
+  display:flex;flex-direction:column;gap:2px;border-left:2px solid var(--border2);min-width:0;}
+.mtf-tf.f4h{border-left-color:var(--btc);}
+.mtf-tf-h{font-size:12px;font-family:var(--font-u);color:var(--txt3);
+  display:flex;justify-content:space-between;gap:6px;white-space:nowrap;}
+.mtf-tf-h b{font-family:var(--font-n);font-weight:700;}
+.mtf-tf-h b.up{color:var(--up);} .mtf-tf-h b.dn{color:var(--down);}
+.mtf-tf-r{font-size:12px;font-family:var(--font-n);white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis;}
+.mtf-bar{position:relative;height:3px;background:var(--border);border-radius:2px;margin:2px 0;}
+.mtf-bar i{position:absolute;top:-2px;width:2px;height:7px;background:var(--btc);
+  border-radius:1px;transform:translateX(-1px);}
+.mtf-tf-s{font-size:11px;color:var(--txt3);font-family:var(--font-u);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.mtf-tf-s .warn{color:var(--warn);} .mtf-tf-s .up{color:var(--up);} .mtf-tf-s .dn{color:var(--down);}
+.mtf-levels{display:flex;gap:5px;overflow-x:auto;overflow-y:hidden;padding-bottom:2px;
+  scrollbar-width:thin;scrollbar-color:var(--border) transparent;}
+.mtf-lv{flex-shrink:0;display:flex;flex-direction:column;gap:1px;padding:3px 7px;border-radius:4px;
+  background:var(--card2);border-left:2px solid var(--border2);min-width:86px;}
+.mtf-lv.above{border-left-color:var(--down);}
+.mtf-lv.below{border-left-color:var(--up);}
+.mtf-lv.flowbid{background:rgba(0,229,204,.10);}
+.mtf-lv.flowask{background:rgba(255,61,110,.10);}
+.mtf-lv-p{font-size:12px;font-family:var(--font-n);font-weight:700;white-space:nowrap;}
+.mtf-lv-d{font-size:10px;font-family:var(--font-u);color:var(--txt3);white-space:nowrap;}
+.mtf-lv-l{font-size:10px;font-family:var(--font-u);white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis;max-width:130px;}
+.mtf-macro{display:flex;gap:10px;flex-wrap:wrap;font-size:11px;
+  font-family:var(--font-u);color:var(--txt3);padding-top:1px;}
+.mtf-macro b{font-family:var(--font-n);color:var(--txt);font-weight:600;}
+.mtf-macro .warn{color:var(--warn);} .mtf-macro .up{color:var(--up);} .mtf-macro .dn{color:var(--down);}
+.mtf-empty{color:var(--txt3);font-family:var(--font-u);font-size:12px;padding:6px 0;}
 
 /* ═══ LIQUIDATION ════════════════════════════════════════════════ */
 .liq-panel{grid-area:liq;}
@@ -474,6 +512,61 @@ html,body{height:100%;background:var(--bg);color:var(--txt);font-family:var(--fo
   </div>
 </div>
 
+<!-- ══ MTF 多时间框架结构 ══════════════════════════════════════ -->
+<div class="card mtf-panel">
+  <div class="card-title">
+    <span>🔭 多时间框架结构</span>
+    <span class="ct-sub" v-if="mtf.status==='ok'">订单流 {{ mtf.last_bar }} · 周/日/4H 自上而下 · 仅背景不含信号</span>
+    <span class="ct-sub" v-else-if="mtf.stale">⚠ 订单流滞后 {{ mtf.stale_min }} 分钟</span>
+    <span class="ct-sub" v-else>加载中…</span>
+  </div>
+  <div class="mtf-body" v-if="mtf.price">
+    <div class="mtf-tfs">
+      <div class="mtf-tf" v-if="mtf.week">
+        <span class="mtf-tf-h">本周 <b :class="mtfCls(mtf.week.chg_pct)">{{ mtfPn(mtf.week.chg_pct) }}%</b></span>
+        <span class="mtf-tf-r">{{ fmtP(mtf.week.low) }} – {{ fmtP(mtf.week.high) }}</span>
+        <span class="mtf-bar"><i :style="{left:(mtf.week.pos_pct||0)+'%'}"></i></span>
+        <span class="mtf-tf-s">{{ mtf.week.pos_pct }}%分位 · <span :class="mtf.week.va_state==='在VA内'?'':'warn'">{{ mtf.week.va_state }}</span> POC {{ fmtP(mtf.week.vp&&mtf.week.vp.poc) }}</span>
+      </div>
+      <div class="mtf-tf" v-if="mtf.yesterday">
+        <span class="mtf-tf-h">昨日 <b>{{ mtf.yesterday.date }}</b></span>
+        <span class="mtf-tf-r">{{ fmtP(mtf.yesterday.pdl) }} – {{ fmtP(mtf.yesterday.pdh) }}</span>
+        <span class="mtf-bar"></span>
+        <span class="mtf-tf-s">振幅 ${{ mtf.yesterday.range }} · POC {{ fmtP(mtf.yesterday.vp&&mtf.yesterday.vp.poc) }}</span>
+      </div>
+      <div class="mtf-tf" v-if="mtf.today">
+        <span class="mtf-tf-h">今日 <b :class="mtfCls(mtf.today.chg_pct)">{{ mtfPn(mtf.today.chg_pct) }}%</b></span>
+        <span class="mtf-tf-r">{{ fmtP(mtf.today.low) }} – {{ fmtP(mtf.today.high) }}</span>
+        <span class="mtf-bar"><i :style="{left:(mtf.today.pos_pct||0)+'%'}"></i></span>
+        <span class="mtf-tf-s">{{ mtf.today.pos_pct }}%分位 · 区间 ${{ mtf.today.range }}</span>
+      </div>
+      <div class="mtf-tf f4h" v-if="mtf.h4">
+        <span class="mtf-tf-h">近4H <b :class="mtfCls(mtf.h4.price_chg_pct)">{{ mtfPn(mtf.h4.price_chg_pct) }}%</b></span>
+        <span class="mtf-tf-r">Δ <span :class="mtfCls(mtf.h4.delta)">{{ mtfPn(mtf.h4.delta,0) }}</span> · CVD <span :class="mtfCls(mtf.h4.cvd_chg)">{{ mtfPn(mtf.h4.cvd_chg,0) }}</span></span>
+        <span class="mtf-bar"><i :style="{left:(mtf.h4.pos_pct||0)+'%'}"></i></span>
+        <span class="mtf-tf-s">{{ mtf.h4.pos_bars }}/{{ mtf.h4.bars }}根正 · <span v-if="mtf.h4.divergence" class="warn">⚠价量背离</span><span v-else>量价同向</span></span>
+      </div>
+    </div>
+    <div class="mtf-levels">
+      <div v-for="l in (mtf.levels||[])" :key="l.price" class="mtf-lv"
+           :class="[l.side, l.flow==='bid'?'flowbid':(l.flow==='ask'?'flowask':'')]">
+        <span class="mtf-lv-p">{{ fmtP(l.price) }}</span>
+        <span class="mtf-lv-d">{{ l.dist_pct>0?'↑+':'↓' }}{{ l.dist_pct }}%</span>
+        <span class="mtf-lv-l">{{ l.labels.join('·') }}</span>
+      </div>
+    </div>
+    <div class="mtf-macro" v-if="mtf.macro">
+      <span>象限 <b>{{ mtf.macro.quadrant }}</b></span>
+      <span>费率 <b>{{ mtf.macro.funding }}%</b> Z<b :class="Math.abs(mtf.macro.funding_z)>=2?'warn':''">{{ mtfPn(mtf.macro.funding_z) }}</b><span v-if="Math.abs(mtf.macro.funding_z)>=2" class="warn"> ⚠拥挤</span></span>
+      <span>OI <b>{{ mtf.macro.oi_now_b }}B</b> <b :class="mtfCls(mtf.macro.oi_chg_24h_pct)">{{ mtfPn(mtf.macro.oi_chg_24h_pct) }}%</b></span>
+      <span>大户多空 <b>{{ mtf.macro.ls_ratio }}</b></span>
+      <span v-if="mtf.macro.etf_stable_m!=null">ETF <b :class="mtfCls(mtf.macro.etf_stable_m)">{{ mtfPn(mtf.macro.etf_stable_m,0) }}M</b> ({{ mtf.macro.etf_stable_date }}) {{ mtf.macro.etf_streak }}</span>
+      <span v-if="mtf.large_trades">近8H大单 净<b :class="mtfCls(mtf.large_trades.net)">{{ mtf.large_trades.net>=0?'买':'卖' }}{{ Math.abs(mtf.large_trades.net) }}</b>BTC</span>
+    </div>
+  </div>
+  <div class="mtf-empty" v-else>等待市场结构数据…</div>
+</div>
+
 <!-- ══ LIQUIDATION ══════════════════════════════════════════════ -->
 <div class="card liq-panel">
   <div class="card-title"><span>⚡ 清算大单</span><span class="ct-sub">OKX+Gate·$1万+·今日{{ liqFeed.length }}笔</span></div>
@@ -525,6 +618,13 @@ createApp({
     const cbPremium=ref(0),cbPct=ref(0);
     const liqFeed=ref([]),lastUpdate=ref('--:--:--');
     const currentSignal=ref(null),signalHistory=ref([]);
+    // ── 多时间框架结构（2026-07-26）: /api/market/structure 纯计算数据 ──
+    const mtf=ref({});
+    async function pollMtf(){
+      try{ const r=await fetch('/api/market/structure'); mtf.value=await r.json(); }catch(_){}
+    }
+    const mtfPn=(v,d=2)=>v==null?'--':(v>=0?'+':'')+Number(v).toFixed(d);
+    const mtfCls=v=>v==null?'':(v>0?'up':(v<0?'dn':''));
     const flashUp=ref(false),flashDown=ref(false),clientInfo=ref('--');
     const okxLiq=ref({connected:false,last_event_sec_ago:null});
     const gateLiq=ref({connected:false,last_poll_sec_ago:null});
@@ -532,7 +632,7 @@ createApp({
     const ibAsia=ref({}),ibEurope=ref({}),ibUs=ref({});
     const vp=ref({}),mp=ref({}),etf=ref({});
     const cvdToday=ref(0),cvdChanges=ref({});
-    let liqId=0,ws=null,reconnT=null,hbT=null,healthT=null,sigT=null;
+    let liqId=0,ws=null,reconnT=null,hbT=null,healthT=null,sigT=null,mtfT;
 
     function applyTheme(){ document.documentElement.className=isDark.value?'':'light'; }
     function toggleTheme(){ isDark.value=!isDark.value; localStorage.setItem('btc-theme',isDark.value?'dark':'light'); applyTheme(); }
@@ -769,8 +869,8 @@ createApp({
       return'●轮询中';
     });
 
-    onMounted(()=>{applyTheme();connect();pollHealth();healthT=setInterval(pollHealth,60000);pollSignals();sigT=setInterval(pollSignals,30000);});
-    onUnmounted(()=>{if(ws)ws.close();clearInterval(hbT);clearInterval(healthT);clearInterval(sigT);clearTimeout(reconnT);});
+    onMounted(()=>{applyTheme();connect();pollHealth();healthT=setInterval(pollHealth,60000);pollSignals();sigT=setInterval(pollSignals,30000);pollMtf();mtfT=setInterval(pollMtf,60000);});
+    onUnmounted(()=>{if(ws)ws.close();clearInterval(hbT);clearInterval(healthT);clearInterval(sigT);clearInterval(mtfT);clearTimeout(reconnT);});
 
     return{
       connected,price,change24h,volume24h,funding,oiBtc,oiChanges,
@@ -778,6 +878,7 @@ createApp({
       ibAsia,ibEurope,ibUs,ibChart,vp,vpChart,mp,mpChart,mpPositionText,etf,
       cvdToday,cvdChanges,cvdTfList,
       currentSignal,signalHistory,sigAgo,sigTime,sigBadgeClass,sigBadgeText,
+      mtf,mtfPn,mtfCls,
       sortedFunding,sentiment,oiTFData,cbSignal,maxLiq,
       okxLiqText,okxLiqClass,gateLiqText,gateLiqClass,
       fmtP,fmtVol,fmtOI,fmtUsd,fmtOIVal,fmtCvd,fColor,

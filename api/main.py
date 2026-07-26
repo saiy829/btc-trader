@@ -1669,3 +1669,20 @@ async def signal_history(days: int = 7):
         return {"count": len(rows), "signals": [dict(r) for r in rows]}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
+
+
+# ══════════════════════════════════════════════════════════════════
+#  多时间框架市场结构（2026-07-26 新增，纯新增不动任何既有端点）
+#  面板实时读盘用：周/昨日/今日/4H 结构 + 订单流 + 宏观 + 关键价位表。
+#  全部为代码确定性计算（无AI、不预测方向），详见
+#  briefing/market_structure.py 的设计原则。
+# ══════════════════════════════════════════════════════════════════
+
+@app.get("/api/market/structure")
+async def market_structure():
+    """多时间框架市场结构快照（供 mb.661688.xyz 面板实时刷新）"""
+    try:
+        from briefing.market_structure import get_market_structure
+        return get_market_structure()
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
