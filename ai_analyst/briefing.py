@@ -83,12 +83,31 @@ logger = setup_logger()
 
 # 每个 session 的输出 token 上限（早盘13节内容长，需要更大空间防止截断）
 MAX_TOKENS = {
-    "morning":        8192,
-    "weekly":         8192,   # 7P：周报（12节，周一取代morning_monday）
+    # 早盘/周报走 opus-5（默认带扩展思考，token预算含思考，故提到16000防截断，
+    # 实测11403字输出 end_turn 未截断；见 MODELS 注释）
+    "morning":        16000,
+    "weekly":         16000,
     "noon":           2500,   # 7M：正午简报（ETF确认+亚盘复盘，7节）
     "europe":         3000,
     "evening":        3000,
     "ondemand":       2000,
+}
+
+# 2026-07-26 P1：按会话选模型（原全用旧的 claude-sonnet-4-5）。
+# 早盘/周报=深度分析→claude-opus-5（实测跑通：max_tok16000、耗时~4min、
+#   end_turn未截断、12节齐全；opus-5默认带扩展思考，返回ThinkingBlock，靠下方
+#   generate_briefing里的健壮取文本跳过思考块）。
+# 其余频繁短会话=claude-sonnet-5（返回标准文本块、快、省）。
+# 想调回全 sonnet-5：把 morning/weekly 改成 "claude-sonnet-5" 并把上面
+#   MAX_TOKENS 改回 8192 即可。改这里就能切换单个会话的模型。
+DEFAULT_MODEL = "claude-sonnet-5"
+MODELS = {
+    "morning":  "claude-opus-5",
+    "weekly":   "claude-opus-5",
+    "noon":     "claude-sonnet-5",
+    "europe":   "claude-sonnet-5",
+    "evening":  "claude-sonnet-5",
+    "ondemand": "claude-sonnet-5",
 }
 
 
@@ -931,13 +950,23 @@ def generate_briefing(binance, mf=None, ib=None,
         prompt = build_prompt(binance, mf or {}, ib or {},
                               etf or {}, cme or {}, vp or {}, session)
         max_tok = MAX_TOKENS.get(session, 3000)
-        logger.info(f"Claude API 调用 | 会话: {session} | max_tokens: {max_tok}")
-        msg = client.messages.create(
-            model="claude-sonnet-4-5",
-            max_tokens=max_tok,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        result = _sanitize(msg.content[0].text)
+        model = MODELS.get(session, DEFAULT_MODEL)
+        _kwargs = {"model": model, "max_tokens": max_tok,
+                   "messages": [{"role": "user", "content": prompt}]}
+        # 2026-07-26：短会话禁用扩展思考。sonnet-5/opus-5 默认会对复杂prompt
+        # 开思考，思考token计入max_tokens——短会话的小预算(2000-3000)会被思考
+        # 吃光导致正文截断(实测evening sonnet-5仅出247字就max_tokens截断)。
+        # 早盘/周报走opus-5保留默认思考(深度分析,16000预算实测end_turn未截断)。
+        if session not in ("morning", "weekly"):
+            _kwargs["thinking"] = {"type": "disabled"}
+        logger.info(f"Claude API 调用 | 会话: {session} | 模型: {model} | "
+                    f"max_tokens: {max_tok} | 思考: {'on' if session in ('morning','weekly') else 'off'}")
+        msg = client.messages.create(**_kwargs)
+        # 健壮取文本：只取 type=='text' 的块，跳过扩展思考模型(如opus-5)的
+        # ThinkingBlock（否则 content[0].text 会在思考块上 AttributeError）
+        result = _sanitize("".join(
+            b.text for b in msg.content if getattr(b, "type", None) == "text"
+        ))
         stop_reason = msg.stop_reason
         logger.info(f"简报生成完成（{len(result)} 字）[{session}] stop_reason={stop_reason}")
         if stop_reason == "max_tokens":
