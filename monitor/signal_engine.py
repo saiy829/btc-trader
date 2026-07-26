@@ -71,6 +71,12 @@ ATR_T2_MULT   = 3.0   # 目标2 = entry±3.0×ATR（2R）
 
 EXPIRE_HOURS  = 24     # 开仓超过这个小时数未触及任何边界 → expired
 
+# 2026-07-26：回测证否——综合分引擎(ETF符号跟随)负期望-0.31R/单、确认门也救不活；
+# 订单流吸收信号方向亦无边际。故停止向 Telegram 推送信号(避免误导，虽是纸面)，
+# 但引擎继续每5分钟评分、记 engine_signals/engine_scores、跟踪结果——保留研究
+# 数据管线，随时可把此开关置 True 恢复推送。改此开关不动任何评分/触发逻辑。
+PUBLISH_TG = False
+
 
 # ══════════════════════════════════════════════════════════════════
 #  数据库：engine_signals 表（7G）+ engine_scores 遥测表（7N）
@@ -151,6 +157,11 @@ def _record_score(result: dict):
 # ══════════════════════════════════════════════════════════════════
 
 def _send_tg(text: str):
+    # 2026-07-26：单点闸门。回测证否引擎无边际后停发TG(见 PUBLISH_TG)，
+    # 记库/评分/结果跟踪不受影响，仅不向用户推送以免误导。
+    if not PUBLISH_TG:
+        logger.info("[TG已禁用-引擎回测无边际] 略过推送")
+        return
     try:
         resp = requests.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
