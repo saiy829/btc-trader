@@ -1656,17 +1656,27 @@ async def signal_latest():
 # （Sea 2026-07 确认：日内交易场景，7天窗口够用，不用管条数上限）。
 @app.get("/api/signal/history")
 async def signal_history(days: int = 7):
-    """返回 engine_signals 表最近 N 天全部记录（全字段，按时间倒序）"""
+    """
+    2026-08-02 起改为服务 of_signals（订单流反转承接引擎，Phase 8）——
+    AtasBridge 图上显示的 entry/stop/tp 由此而来。综合分引擎(engine_signals)已
+    经干净回测证否、停用，不再显示。补 score=0 字段是为兼容 AtasBridge DLL 的
+    SignalItem 结构(它期待score字段;订单流无综合分,故置0,图上四条价格线正常绘制)。
+    """
     try:
         cutoff = (datetime.now(SGT) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
         conn = sqlite3.connect(_ATAS_DB, timeout=5)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT * FROM engine_signals WHERE created_at >= ? ORDER BY id DESC",
+            "SELECT * FROM of_signals WHERE created_at >= ? ORDER BY id DESC",
             (cutoff,)
         ).fetchall()
         conn.close()
-        return {"count": len(rows), "signals": [dict(r) for r in rows]}
+        out = []
+        for r in rows:
+            d = dict(r)
+            d.setdefault("score", 0)   # AtasBridge DLL 兼容字段
+            out.append(d)
+        return {"count": len(out), "signals": out}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
