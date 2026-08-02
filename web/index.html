@@ -175,7 +175,54 @@ html,body{height:100%;background:var(--bg);color:var(--txt);font-family:var(--fo
 .cvd-tf-val{font-size:15px;font-weight:700;font-family:var(--font-n);}
 .cvd-note{font-size:12px;color:var(--txt3);font-family:var(--font-u);flex-shrink:0;white-space:nowrap;}
 
-/* ═══ SIGNAL ENGINE（Phase 7J）═══════════════════════════════════ */
+/* ═══ MTF 多时间框架结构 ═════════════════════════════════════════ */
+.mtf-panel{grid-area:mtf;}
+.mtf-body{display:flex;flex-direction:column;gap:5px;padding:2px 0;}
+.mtf-tfs{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;}
+.mtf-tf{background:var(--card2);border-radius:5px;padding:5px 8px;
+  display:flex;flex-direction:column;gap:2px;border-left:2px solid var(--border2);min-width:0;}
+.mtf-tf.f4h{border-left-color:var(--btc);}
+.mtf-tf-h{font-size:12px;font-family:var(--font-u);color:var(--txt3);
+  display:flex;justify-content:space-between;gap:6px;white-space:nowrap;}
+.mtf-tf-h b{font-family:var(--font-n);font-weight:700;color:var(--txt);}
+.mtf-tf-h b.up{color:var(--up);} .mtf-tf-h b.dn{color:var(--down);}
+.mtf-tf-r{font-size:12px;font-family:var(--font-n);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.mtf-tf-r .up{color:var(--up);} .mtf-tf-r .dn{color:var(--down);}
+.mtf-bar{position:relative;height:3px;background:var(--border);border-radius:2px;margin:2px 0;}
+.mtf-bar i{position:absolute;top:-2px;width:2px;height:7px;background:var(--btc);border-radius:1px;transform:translateX(-1px);}
+.mtf-tf-s{font-size:11px;color:var(--txt3);font-family:var(--font-u);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.mtf-tf-s .warn{color:var(--warn);} .mtf-tf-s .up{color:var(--up);} .mtf-tf-s .dn{color:var(--down);}
+.mtf-levels{display:flex;gap:5px;overflow-x:auto;overflow-y:hidden;padding-bottom:2px;
+  scrollbar-width:thin;scrollbar-color:var(--border) transparent;}
+.mtf-lv{flex-shrink:0;display:flex;flex-direction:column;gap:1px;padding:3px 7px;border-radius:4px;
+  background:var(--card2);border-left:2px solid var(--border2);min-width:86px;}
+.mtf-lv.above{border-left-color:var(--down);}
+.mtf-lv.below{border-left-color:var(--up);}
+.mtf-lv.flowbid{background:rgba(0,229,204,.10);}
+.mtf-lv.flowask{background:rgba(255,61,110,.10);}
+.mtf-lv-p{font-size:12px;font-family:var(--font-n);font-weight:700;white-space:nowrap;}
+.mtf-lv-d{font-size:10px;font-family:var(--font-u);color:var(--txt3);white-space:nowrap;}
+.mtf-lv-l{font-size:10px;font-family:var(--font-u);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:130px;}
+.mtf-macro{display:flex;gap:10px;flex-wrap:wrap;font-size:11px;font-family:var(--font-u);color:var(--txt3);padding-top:1px;}
+.mtf-macro b{font-family:var(--font-n);color:var(--txt);font-weight:600;}
+.mtf-macro .warn{color:var(--warn);} .mtf-macro .up{color:var(--up);} .mtf-macro .dn{color:var(--down);}
+.mtf-empty{color:var(--txt3);font-family:var(--font-u);font-size:12px;padding:6px 0;}
+
+/* ═══ 数据推送健康指示 ═════════════════════════════════════════ */
+.feed-health{display:flex;align-items:center;gap:5px;padding:3px 9px;border-radius:5px;
+  background:var(--card2);border:1px solid var(--border2);font-family:var(--font-u);
+  font-size:12px;cursor:default;white-space:nowrap;flex-shrink:0;}
+.feed-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;background:var(--txt3);}
+.feed-health.ok   .feed-dot{background:var(--up);box-shadow:0 0 6px var(--up);}
+.feed-health.warn .feed-dot{background:var(--warn);box-shadow:0 0 6px var(--warn);}
+.feed-health.down .feed-dot{background:var(--down);box-shadow:0 0 6px var(--down);animation:feedblink 1s infinite;}
+@keyframes feedblink{50%{opacity:.3;}}
+.feed-lbl{color:var(--txt3);}
+.feed-val{font-weight:600;}
+.feed-health.ok   .feed-val{color:var(--up);}
+.feed-health.warn .feed-val{color:var(--warn);}
+.feed-health.down .feed-val{color:var(--down);}
+
 /* ═══ LIQUIDATION ════════════════════════════════════════════════ */
 .liq-panel{grid-area:liq;}
 .liq-list{flex:1;overflow-y:auto;overflow-x:hidden;scrollbar-width:thin;
@@ -241,6 +288,10 @@ html,body{height:100%;background:var(--bg);color:var(--txt);font-family:var(--fo
       </span>
     </a>
     <div class="hdr-item"><span class="hdr-lbl">更新</span><span class="hdr-val dim">{{ lastUpdate }} SGT</span></div>
+    <div class="feed-health" :class="feed.status||''"
+         :title="'AtasBridge推送 '+(feed.symbol||'')+' | 最新K线:'+(feed.bar_ago||'?')+' 大单:'+(feed.trade_ago||'?')+' 吸收:'+(feed.absorb_ago||'?')+' | 查于'+(feed.checked_at||'')">
+      <span class="feed-dot"></span><span class="feed-lbl">推送</span><span class="feed-val">{{ feedText }}</span>
+    </div>
   </div>
   <div class="hdr-actions">
     <button class="theme-btn" @click="toggleTheme">{{ isDark?'☀️':'🌙' }}</button>
@@ -533,6 +584,13 @@ createApp({
     const liqFeed=ref([]),lastUpdate=ref('--:--:--');
     // ── 多时间框架结构（2026-07-26）: /api/market/structure 纯计算数据 ──
     const mtf=ref({});
+    const feed=ref({});
+    async function pollFeed(){ try{const r=await fetch('/api/feed/health');feed.value=await r.json();}catch(_){feed.value={status:''};} }
+    const feedText=computed(()=>{const f=feed.value||{};
+      if(f.status==='ok')return f.bar_ago||'正常';
+      if(f.status==='warn')return '延迟'+(f.bar_ago||'');
+      if(f.status==='down')return '断流'+(f.bar_ago||'');
+      return '检查中';});
     async function pollMtf(){
       try{ const r=await fetch('/api/market/structure'); mtf.value=await r.json(); }catch(_){}
     }
@@ -545,7 +603,7 @@ createApp({
     const ibAsia=ref({}),ibEurope=ref({}),ibUs=ref({});
     const vp=ref({}),mp=ref({}),etf=ref({});
     const cvdToday=ref(0),cvdChanges=ref({});
-    let liqId=0,ws=null,reconnT=null,hbT=null,healthT=null,mtfT;
+    let liqId=0,ws=null,reconnT=null,hbT=null,healthT=null,mtfT,feedT;
 
     function applyTheme(){ document.documentElement.className=isDark.value?'':'light'; }
     function toggleTheme(){ isDark.value=!isDark.value; localStorage.setItem('btc-theme',isDark.value?'dark':'light'); applyTheme(); }
@@ -753,15 +811,15 @@ createApp({
       return'●轮询中';
     });
 
-    onMounted(()=>{applyTheme();connect();pollHealth();healthT=setInterval(pollHealth,60000);pollMtf();mtfT=setInterval(pollMtf,60000);});
-    onUnmounted(()=>{if(ws)ws.close();clearInterval(hbT);clearInterval(healthT);clearInterval(mtfT);clearTimeout(reconnT);});
+    onMounted(()=>{applyTheme();connect();pollHealth();healthT=setInterval(pollHealth,60000);pollMtf();mtfT=setInterval(pollMtf,60000);pollFeed();feedT=setInterval(pollFeed,30000);});
+    onUnmounted(()=>{if(ws)ws.close();clearInterval(hbT);clearInterval(healthT);clearInterval(mtfT);clearInterval(feedT);clearTimeout(reconnT);});
 
     return{
       connected,price,change24h,volume24h,funding,oiBtc,oiChanges,
       cbPremium,cbPct,liqFeed,lastUpdate,flashUp,flashDown,clientInfo,isDark,
       ibAsia,ibEurope,ibUs,ibChart,vp,vpChart,mp,mpChart,mpPositionText,etf,
       cvdToday,cvdChanges,cvdTfList,
-      mtf,mtfPn,mtfCls,
+      mtf,mtfPn,mtfCls,feed,feedText,
       sortedFunding,sentiment,oiTFData,cbSignal,maxLiq,
       okxLiqText,okxLiqClass,gateLiqText,gateLiqClass,
       fmtP,fmtVol,fmtOI,fmtUsd,fmtOIVal,fmtCvd,fColor,

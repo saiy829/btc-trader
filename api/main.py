@@ -1686,3 +1686,13 @@ def market_structure():  # 同步def：FastAPI自动丢线程池，避免footpri
         return get_market_structure()
     except Exception as e:
         return {"status": "error", "detail": str(e)}
+
+
+@app.get("/api/feed/health")
+def feed_health():
+    """AtasBridge推送健康(每次实查不缓存,供面板及时发现断流)"""
+    try:
+        from briefing.market_structure import get_feed_health
+        return get_feed_health()
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}

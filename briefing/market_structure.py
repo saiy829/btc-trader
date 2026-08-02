@@ -376,5 +376,62 @@ def get_market_structure() -> dict:
     return out
 
 
+
+def get_feed_health() -> dict:
+    """
+    AtasBridge 推送健康检查（每次实查、不走缓存——断流时缓存会冻结在
+    "新鲜"状态反而报不出问题，故必须绕开 get_market_structure 的缓存）。
+    以"币安永续K线"为主判据(正常每5分钟必有一根)：>15分钟无新bar即判定断流。
+    大单/吸收为事件驱动(行情淡时可正常沉默)，仅作辅助信息展示，不作断流判据。
+    """
+    now = datetime.now(BJT).timestamp()
+
+    def _age_min(sql, params=()):
+        try:
+            cc = _conn()
+            r = cc.execute(sql, params).fetchone()
+            cc.close()
+            if not r or not r[0]:
+                return None
+            t = _ep(r[0])
+            return round((now - t) / 60, 1) if t else None
+        except Exception:
+            return None
+
+    bar = _age_min("SELECT MAX(timestamp) FROM atas_bars "
+                   "WHERE exchange='binance' AND market_type='perp'")
+    lt = _age_min("SELECT MAX(timestamp) FROM atas_large_trades "
+                  "WHERE exchange='binance' AND market_type='perp'")
+    ab = _age_min("SELECT MAX(timestamp) FROM atas_signals "
+                  "WHERE signal_type IN ('bid_absorb','ask_absorb')")
+
+    # 主判据：币安永续bar新鲜度
+    if bar is None:
+        status, msg = "down", "无数据"
+    elif bar <= 10:
+        status, msg = "ok", "正常"
+    elif bar <= 20:
+        status, msg = "warn", "轻微延迟"
+    else:
+        status, msg = "down", "断流"
+
+    def _fmt(m):
+        if m is None:
+            return "无"
+        if m < 60:
+            return f"{m:.0f}分钟前"
+        if m < 1440:
+            return f"{m/60:.1f}小时前"
+        return f"{m/1440:.1f}天前"
+
+    return {
+        "status": status, "msg": msg,
+        "symbol": "币安 BTCUSDT 永续",
+        "bar_age_min": bar, "bar_ago": _fmt(bar),
+        "trade_age_min": lt, "trade_ago": _fmt(lt),
+        "absorb_age_min": ab, "absorb_ago": _fmt(ab),
+        "checked_at": datetime.now(BJT).strftime("%H:%M:%S"),
+    }
+
 if __name__ == "__main__":
     print(json.dumps(get_market_structure(), ensure_ascii=False, indent=2))
