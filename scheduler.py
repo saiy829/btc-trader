@@ -16,11 +16,24 @@ CHAT_ID = get_env("TELEGRAM_CHAT_ID")
 TOKEN   = get_env("TELEGRAM_BOT_TOKEN")
 UTC     = timezone.utc
 
+# ── 每日简报暂停闸（2026-07-26）──────────────────────────────────
+# 哨兵文件存在 → 4 个定时简报(早盘/正午/欧盘/美盘, 含周一周报)全部跳过,
+# 不生成不发送。仅拦"定时"简报; /b 手动简报与 /pos 命令不受影响。
+# 暂停: touch 该文件; 恢复: rm 该文件——都无需重启服务(每次触发时检查)。
+import os
+PAUSE_FLAG = "/opt/btc-trader/BRIEFING_PAUSED"
+
+def _paused() -> bool:
+    return os.path.exists(PAUSE_FLAG)
+
 
 # ── 定时任务回调 ─────────────────────────────────────────────────
 
 async def job_morning(context):
     """UTC 01:30（SGT 09:30）早盘简报"""
+    if _paused():
+        logger.info("定时触发：早盘简报 SGT 09:30 —— 已暂停(哨兵文件存在)，跳过")
+        return
     logger.info("定时触发：早盘简报 SGT 09:30")
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, run_briefing, "morning")
@@ -32,6 +45,9 @@ async def job_noon(context):
     # run_daily 的 days 编号约定是否正确（PTB v22.8：0=周日…6=周六）
     now_bj = now_sgt()
     weekday_cn = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][now_bj.weekday()]
+    if _paused():
+        logger.info(f"定时触发：正午简报 {weekday_cn} —— 已暂停(哨兵文件存在)，跳过")
+        return
     logger.info(f"定时触发：正午简报 | 当前北京时间 {now_bj.strftime('%Y-%m-%d %H:%M')} {weekday_cn}")
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, run_briefing, "noon")
@@ -39,6 +55,9 @@ async def job_noon(context):
 
 async def job_europe(context):
     """UTC 07:00（SGT 15:00）欧盘简报"""
+    if _paused():
+        logger.info("定时触发：欧盘简报 SGT 15:00 —— 已暂停(哨兵文件存在)，跳过")
+        return
     logger.info("定时触发：欧盘简报 SGT 15:00")
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, run_briefing, "europe")
@@ -46,6 +65,9 @@ async def job_europe(context):
 
 async def job_evening(context):
     """UTC 12:30（SGT 20:30）美盘简报"""
+    if _paused():
+        logger.info("定时触发：美盘简报 SGT 20:30 —— 已暂停(哨兵文件存在)，跳过")
+        return
     logger.info("定时触发：美盘简报 SGT 20:30")
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, run_briefing, "evening")
