@@ -236,6 +236,33 @@ try { c = GetCandle(i); } catch { break; }   // 从 i = CurrentBar 开始
 `AtasBridge.Platform.csproj` 用 `EnableDefaultCompileItems=false`，**新增源文件
 必须手动登记 `<Compile Include>`**。
 
+### 构建与部署对照
+
+两个项目共用同一份源码（`AtasBridge.cs` / `AtasLiquidations.cs`），每次升级
+**必须同时编译交付两个构建**，保证两边指标目录版本同步。
+
+| 平台 | 项目文件（本机路径） | 部署目录 |
+|---|---|---|
+| ATAS X | `C:\AtasBridge\AtasBridge.csproj` | `%APPDATA%\ATAS X\Indicators\` |
+| ATAS Platform | `C:\AtasBridge.Platform\AtasBridge.Platform.csproj` | `%APPDATA%\ATAS\Indicators\`（实为指向 `D:\bak\ATAS_Data` 的符号链接） |
+
+⚠️ Platform 项目**不能**放在 `C:\AtasBridge\` 里：主项目用默认 glob 包含全部
+`.cs`，会把 Platform 项目 `obj\` 下自动生成的 `AssemblyInfo.cs` 一起编译，
+报一堆 CS0579「特性重复」。仓库里 `AtasBridge/AtasBridge.Platform.csproj` 是
+存档副本，改构建配置时**两处都要改**。
+
+⚠️ 替换 dll 后必须**完全退出 ATAS 进程**再启动。只移除/重新添加指标不会重新
+加载程序集（旧 dll 已在进程内存里）—— 这一条今天坑过好几轮验证。
+
+⚠️ `AtasBridgeVersion.Tag` 是**整个 dll 的**版本号（两个指标同在一个程序集），
+改动任一源文件都要更新它。
+
+### 版本控制
+
+仓库是 `saiy829/btc-trader`，本目录对应其中的 `AtasBridge/`。工作流：
+**本地开发 → scp 到 VPS `/opt/btc-trader/` → 从 VPS 推 GitHub**
+（VPS 上另有 `git_sync.sh`，每天 03:00 自动同步一次）。本地不单独建仓库。
+
 ---
 
 ## 七、遗留事项
