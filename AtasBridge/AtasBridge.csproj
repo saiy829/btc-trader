@@ -28,6 +28,15 @@
       <HintPath>D:\Program Files\ATAS X\System.Drawing.Common.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- Phase 7L: Coinglass 三路数据（OI / 多空比 / 聚合爆仓）。ATAS 自带的
+         三个 Crypto Metrics 指标就是从这个程序集的 Provider 取数的，接口
+         在 ATAS X (8.0.14.646) 和 ATAS Platform (8.0.14.297) 两套 SDK 上
+         逐项一致，因此双平台共用同一份源码、无需 #if 分支。
+         Private=false：运行时用 ATAS 自己加载的那份，不复制到指标目录。 -->
+    <Reference Include="OFT.Coinglass">
+      <HintPath>D:\Program Files\ATAS X\OFT.Coinglass.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
   <!-- 编译后自动复制 DLL 到 ATAS X 指标目录 -->
