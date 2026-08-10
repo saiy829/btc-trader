@@ -29,6 +29,14 @@ namespace AtasBridge
 {
     // ══ AtasLiquidations（2026-08-09，Phase 7L 收尾）═══════════════════════
     //
+    // ⚠️ 本文件**不会单独生成 dll**：它和 AtasBridge.cs 同属 AtasBridge.csproj，
+    //    一起编进 AtasBridge.dll。指标目录下只有 AtasBridge.dll 一个文件，
+    //    ATAS 靠反射从中找出所有 Indicator 子类，注册成两个指标。
+    //    由此有两条约束：
+    //      1. 版本号 AtasBridgeVersion.Tag 是**整个 dll 的**，改这个文件也要更新它
+    //      2. 升级是整体升级，两个指标同进同退
+    //    详见 PHASE7L_Coinglass接入复盘.md「程序集结构」。
+    //
     // 副图爆仓柱状图，多头向上、空头向下，与 Coinglass 网页「币种爆仓」同口径。
     // 用来替掉 ATAS 自带的 Aggregated Liquidations —— 那个指标的数据在加载后
     // 就不再更新（它依赖的逐笔实时订阅通道是坏的，订阅成功但一条回调都不来），

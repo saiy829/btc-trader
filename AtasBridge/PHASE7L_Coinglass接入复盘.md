@@ -236,6 +236,40 @@ try { c = GetCandle(i); } catch { break; }   // 从 i = CurrentBar 开始
 `AtasBridge.Platform.csproj` 用 `EnableDefaultCompileItems=false`，**新增源文件
 必须手动登记 `<Compile Include>`**。
 
+### 程序集结构：两个指标共用一个 dll
+
+**指标目录里只有 `AtasBridge.dll` 一个文件，`AtasLiquidations` 不会单独生成
+dll。** 这一点容易忘，2026-08-09 当天就疑惑过一次（"指标列表里看得到
+AtasLiquidations，怎么 `%APPDATA%\ATAS\Indicators` 下找不到它的 dll"）。
+
+```
+AtasBridge.dll                     ← 部署的唯一文件
+   ├── AtasBridge          (主图)  ← AtasBridge.cs
+   └── AtasLiquidations    (副图)  ← AtasLiquidations.cs
+```
+
+原因：一个 `.csproj` 编译产出**一个程序集**，里面可以放任意多个类。两个 `.cs`
+文件同属 `AtasBridge.csproj`，所以编进同一个 dll。ATAS 加载指标的方式是扫描
+`Indicators` 目录下每个 dll，用反射找出其中所有继承 `Indicator` 的公开类，
+逐个注册——所以一个 dll 提供多个指标是完全正常的（ATAS 自带那些 GUID 命名的
+dll，有的一个里面就装了整套指标）。
+
+由此带来两条必须记住的约束：
+
+1. **版本号是整个 dll 共享的。** 两个指标无法各自带版本号。改动**任一**源文件
+   都要更新 `AtasBridgeVersion.Tag` —— `-33` 只改了 `AtasLiquidations.cs` 却
+   漏了这里，导致设置面板显示 `-32` 而 CHANGELOG 记到 `-33`。
+2. **升级是整体升级。** 替换一次 dll，两个指标同时更新，不存在只更新其中一个
+   的情况；同理也不会出现两者版本错配。
+
+#### 要不要拆成两个 dll
+
+技术上可以拆成独立项目产出 `AtasLiquidations.dll`，换来各自独立的版本与升级
+节奏。但代价是 Coinglass 取数逻辑得抽成共享库（或复制一份），且每次要编译
+部署 **4 个 dll**（2 平台 × 2 指标）。
+
+当前**不建议拆**：两个指标本就共用同一套接入代码，捆在一起反而不会版本错配。
+
 ### 构建与部署对照
 
 两个项目共用同一份源码（`AtasBridge.cs` / `AtasLiquidations.cs`），每次升级
