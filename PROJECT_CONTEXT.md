@@ -8,7 +8,7 @@
 | 项目 | 信息 |
 |---|---|
 | GitHub 仓库 | https://github.com/saiy829/btc-trader （**公开**） |
-| VPS 服务商 | Hetzner，Ubuntu 22.04 LTS，德国法兰克福 |
+| VPS 服务商 | **netcup GmbH（AS197540），Ubuntu 22.04.5 LTS，德国纽伦堡 Nuremberg** ⚠️ 2026-08-11 更正：原文档写"Hetzner，德国法兰克福"，两处都不对。实测 `ipinfo.io`：`94.16.118.7` → `org: AS197540 netcup GmbH`、`city: Nuremberg`、反解主机名 `v2202606194457470483.supersrv.de`（netcup 域名）。后续报告与排查一律按纽伦堡口径 |
 | VPS Hostname | `206507`（root@206507） |
 | 项目目录 | `/opt/btc-trader/` |
 | Python 环境 | pyenv 管理，venv 在 `/opt/btc-trader/venv/` |
@@ -224,7 +224,16 @@ BTC_TRADER_KEY=...         # 64位随机密钥，不在GitHub上
 # /pos 仓位风控命令默认值（2026-07-04 Phase 7B 新增，改后重启 btc-briefing 生效）
 POS_ACCOUNT_USDT=10000     # 默认账户资金（USDT），命令不填第3个参数时使用
 POS_RISK_PCT=1.0           # 默认单笔风险百分比，命令不填第4个参数时使用
+
+# 统一爆仓采集器（2026-08-11 任务卡 9B 新增，改后重启 btc-liq-unified 生效）
+UNIFIED_LIQ_ENABLED=1      # ≠1 时进程空转：不连接交易所、不落库
 ```
+
+> 注：`LIQ_SINGLE_USD` / `LIQ_HOURLY_USD` 只作用于旧的 `btc-liq-monitor` 与
+> `btc-gate-liq`（预警门槛）。统一采集器 `btc-liq-unified` **不设金额门槛、
+> 全部落库**，过滤在查询层做，因此不读这两个变量。
+> 另：`.env` 里 `LIQ_SINGLE_USD=100000` 的行内注释写着"当前：30万美元"，
+> 与实际值 10 万不符，属注释陈旧（2026-08-11 发现，未改动该行）。
 
 ---
 
@@ -245,6 +254,7 @@ POS_RISK_PCT=1.0           # 默认单笔风险百分比，命令不填第4个�
 | `atas_bars` | AtasBridge.dll 推送的四路(币安/OKX现货/永续)K线+footprint（`(exchange,market_type,timestamp,timeframe)`唯一索引，`/atas/bar`用INSERT OR REPLACE幂等写入，2026-07-06 Phase 7H加固） | `timestamp`, `timeframe`, `exchange`, `market_type`, `open/high/low/close`, `volume`, `delta`, `cumulative_delta`, `max_oi`, `min_oi`, `poc_price`, `footprint_json` |
 | `atas_large_trades` | AtasBridge.dll 推送的大额/鲸鱼级成交 | `timestamp`, `exchange`, `market_type`, `price`, `volume`, `direction`, `threshold_level` |
 | `atas_absorption` | AtasBridge.dll 原生吸收信号（2026-07-06 Phase 7F新增，取代旧ATAS内置Webhook） | `timestamp`, `exchange`, `market_type`, `side`, `price`, `absorbed_btc`, `bid_vol`, `ask_vol`, `ratio` |
+| `liquidations` | **统一爆仓表（2026-08-11 任务卡 9B 新增，由 `monitor/unified_liq_collector.py` / 服务 `btc-liq-unified` 写入）**。OKX / Bybit / Gate 三家 WebSocket 实时采集，**不设金额门槛全部落库，过滤在查询层做**。`uid = md5(exchange\|ts_ms\|side\|price\|qty_btc)` 作主键 + `INSERT OR IGNORE` 去重。`raw` 存原始 JSON 全文（Bybit 一条消息可含多个事件，`raw` 是整条消息，核对时按 `(v,p,T)` 定位）。方向统一口径 `LONG_LIQ`=多头被强平/`SHORT_LIQ`=空头被强平/`UNKNOWN`=无法确证（绝不猜）。与旧表 `binance_liq`（0行、无任何代码写入）、`gate_liquidations`（停更于 2026-07-01）**并行共存，本卡未切换面板** | `uid`(主键), `ts_ms`(交易所事件毫秒), `ts`(秒), `exchange`, `symbol`, `side`, `price`, `qty_btc`, `qty_usd`, `raw`, `collector`, `ingested_at`；索引 `idx_liq_ts` / `idx_liq_ex_ts` / `idx_liq_side_ts` |
 
 `briefing/binance_briefing_data.py` 在每次简报前读取这些表，计算 Z-score 和三因子状态。
 
@@ -567,6 +577,63 @@ subprocess.run(['wp', 'post', 'create', ...])
 - **阈值**（从 .env 读取）：单笔 > $10万 发预警；1H累计 > $300万 发预警
 - 大额清算触发 AI 分析（`ai_analyst/liq_briefing.py`）
 
+### 统一爆仓采集器（btc-liq-unified，2026-08-11 任务卡 9B 新增）：
+
+- **入口**：`run_unified_liq.py` → `monitor/unified_liq_collector.py`
+- **覆盖**：OKX / Bybit / Gate 三家 WebSocket，落 `liquidations` 表。
+  **不含 Binance**（9A 实测其 WS 行情层对本次三个数据中心 IP 均不投递数据，
+  改代码无法修复）、**不含 Hyperliquid**（官方文档明确公开频道不暴露爆仓，见下）
+- **与旧服务并行运行**，`btc-liq-monitor` / `btc-gate-liq` 未停未改，面板未切换
+- **开关**：`.env` 的 `UNIFIED_LIQ_ENABLED=1`（≠1 则进程空转，不连接不落库）
+
+三家的订阅与换算（**全部 2026-08-11 实测确证，勿凭记忆改**）：
+
+| 交易所 | 频道 | 换算 | 方向判定 |
+|---|---|---|---|
+| OKX | `liquidation-orders` + `instType=SWAP` | `sz张 × 0.01 BTC` | `details.side=="sell"` → `LONG_LIQ`（`posSide` 自证：sell 恒对应 posSide=long） |
+| Bybit | `allLiquidation.BTCUSDT` | `v` 已是 BTC | **`S=="Buy"` → `LONG_LIQ`** |
+| Gate | `futures.public_liquidates` | `abs(size) × 0.0001 BTC` | **WS `size<0` → `LONG_LIQ`** |
+
+四个必须记住的坑：
+
+1. **OKX 不支持 `instId` 维度订阅**（实测 `code 60018`：`channel:liquidation-orders,
+   instId:BTC-USDT-SWAP doesn't exist`），`instFamily` 也会被服务端静默丢弃
+   （应答里 `arg` 只回 `instType`）。只能订全市场，在解析入口过滤。
+2. **OKX 合约过滤必须精确匹配 `BTC-USDT-SWAP`，不能用 `startswith("BTC")`**。
+   OKX 另有 `BTC-USD-SWAP`，`ctVal=100 **USD**`（反向合约），混进来按
+   0.01 BTC/张 算会把金额高估 `price/10000` 倍。旧 `monitor/liquidation_monitor.py`
+   正是用前缀匹配，实测对账中两笔 BTC-USD-SWAP 被高估 6.35 倍
+   （$199,220 报成 $1,264,264；$1,810 报成 $11,494）。
+3. **Bybit 的 `subscribe` 是整批语义**：一次放多个 topic，任一无效则整批被拒、
+   同连接上所有订阅一起失效（9A 实测 `liquidation.BTCUSDT` 已下线，返回
+   `error:handler not found`）。**本采集器强制一个 topic 一条 subscribe**。
+4. **Gate 的 WS 与 REST 符号约定相反**：REST `liq_orders` 的 `size` 是**持仓**
+   方向（`size>0`=多头，159 样本价格走势检验：104 次落在下跌分钟 / 9 次上涨）；
+   WS `public_liquidates` 的 `size` 是**强平委托单**方向（卖出为负），
+   故 **WS `size<0`=多头爆仓**。实测把 6 个 WS 事件按 `(秒,|size|)` 与 REST 配对，
+   绝对值一一对应而符号 6/6 全部相反。旧 `gate_liq_monitor.py` 注释的
+   "size>0=多头爆仓" 是 **REST 口径**，对它自己（REST 轮询）成立，**照搬到 WS 会反**。
+   另：WS 的 `price` 实测等于 REST 的 `order_price`（6/6 精确吻合），
+   是**委托/触发价而非成交价**，比 `fill_price` 低约 0.3%。
+
+**双流健康检查（本服务的核心机制）**：每路在同一连接上另订一条高频对照流
+（OKX `trades` / Bybit `publicTrade.BTCUSDT` / Gate `futures.trades`），只计数不落库。
+
+- 连接健康 = 对照流 60 秒内有消息
+- 对照流静默 > 120 秒 → 主动断开重连
+- 连续 3 次重连后对照流仍静默 → 推 Telegram（冷却 30 分钟）
+- **爆仓流本身长时间无数据不告警** —— 9A 实测 Gate 首条爆仓延迟达 39~53 分钟，
+  属正常。这条是针对旧监控"订阅成功但零数据、41 天无人察觉"那类静默失效设计的：
+  只验证"连接没报错"是不够的，必须验证"真的在收数据"。
+
+**健康端点**：采集器进程自身在 `127.0.0.1:8011/api/liq/health` 提供，并每 5 秒原子
+写快照到 `data/liq_unified_health.json`。`api/liq_routes.py` 已写好 APIRouter
+（`/api/liq/health` `/summary` `/recent`）读该快照，**但 9B 未挂载**（范围声明要求
+不改 `api/main.py`；且挂载需重启 `btc-api`，会清零面板内存里的
+`S["liq"]`/`liq_daily_*`）。将来挂载务必写 `from api.liq_routes import ...`
+带包前缀 —— `api/binance_routes.py` 当年就是漏了前缀导致模块找不到，
+最后把路由内联进 `api/main.py:861`，那个文件至今是死代码。
+
 ### 资金费率监控（btc-funding-monitor）：
 - 每 5 分钟轮询 5 家交所
 - 触发：单所 |rate| > 0.05%（30分钟冷却）
@@ -728,7 +795,9 @@ tail -20 /opt/btc-trader/logs/git_sync.log
 | BTC永续价格/OI/IB/VP | Binance REST | 正常 |
 | 资金费率（实时） | Binance `/fapi/v1/premiumIndex` | v2修复：原用历史接口有延迟 |
 | 5交所费率 | 各所公开API（无需Key） | Binance/OKX/Bybit/Bitget/Gate |
-| 实时清算 | OKX WebSocket | Binance WS 德国IP被封 |
+| 实时清算 | **OKX + Bybit + Gate WebSocket**（`btc-liq-unified`，2026-08-11 9B 起） | 详见第十二节。旧 `btc-liq-monitor` 仍并行运行（只发 TG 不落库） |
+| 清算 · Binance | **不可用** | ⚠️ **2026-08-11 更正**：原文档写"Binance WS 德国IP被封"，**该结论不准确**。9A 三节点实测（德国 94.16.118.7 / 89.58.0.82、**香港 43.128.29.190**）：四种连接方式（组合流/raw单流 × 爆仓流/对照流）在**两个国家三个 IP 上全部零消息**，故**不是德国 IP 特有的地区封锁**。同时连接层完全健康（各只连 1 次、0 重连、0 异常，`ping_timeout=20` 下 4 小时不断说明服务端心跳正常）、**REST 完全可用**（窗口 K 线就是从 `fapi.binance.com` 取的）。准确表述：**WS 行情层对本次涉及的数据中心 IP 静默不投递数据**。三个 IP 的共同点是都属云服务商机房（netcup ×2、Tencent ×1）；要区分"按 ASN/机房段策略"还是其他原因，需增加一个住宅/移动出口 IP 作第四对照点。**改代码无法修复** |
+| 清算 · Hyperliquid | **公开渠道不可用** | 2026-08-11 实测：官方文档明确 *"public feeds do not expose liquidations"*，`trades` 只有 `coin/side/px/sz/hash/time/tid/users` 八字段无爆仓标记；`recentTrades` REST **每次只返 10 条**（旧 `hyperliquid_poller()` 每 30 秒轮询 10 条，采样率上根本看不全，这是它 30 天零事件的真因之一）；猜测性端点 `liquidations`/`recentLiquidations`/`allLiquidations` 全部 HTTP 422；HLP 金库（`vaultDetails` 确认 name=`Hyperliquidity Provider (HLP)`）的 `userFills` 返回 0 条。爆仓数据只在 `userEvents`/`userFills`/`userNonFundingLedgerUpdates` 等**按地址**频道（含 `liquidation.liquidatedUser` 与 `method: market\|backstop`）。Coinglass 确有该数据（实测截图 1 小时 $191.52万），故存在性成立、路径未明。待查：L1 explorer/区块数据；反推公开流是否有可辨识签名 |
 | ETF资金流 | SoSoValue API（需Key） + Farside 爬虫 | 双源交叉验证 |
 | ETF 12:00 确认 | noon正午简报（scheduler.py run_daily UTC04:00 周二至周六） | 2026-07-13 7M起接管；原etf_confirm_push.py cron三重失效已退役（Bug#36） |
 | CME缺口 | Binance现货近似（v2改为静态历史追踪） | CME 24/7后不再动态计算 |
