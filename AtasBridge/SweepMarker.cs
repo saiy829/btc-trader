@@ -61,10 +61,64 @@ namespace AtasBridge
     //    the indicator unusable. Every sound goes through the same guard,
     //    extended with the event type.
     // ==================================================================
+    // ENCODING NOTE (2026-08-12): the user facing strings in this file
+    // (DisplayName / GroupName / Description / on-chart panel text) are Chinese
+    // by explicit request, so this file is UTF-8 rather than pure ASCII.
+    // Code COMMENTS stay English/ASCII, which is what the v5.1 convention was
+    // actually about: PowerShell here-string editing has corrupted Chinese
+    // comments in this repo before. When editing this file use a UTF-8 aware
+    // editor or scp it in - do not pipe it through PowerShell.
     [DisplayName("SweepMarker")]
     [Category("Setups")]
-    [Description("Setup C liquidity sweep reversal marker - entry/stop/TP, long and short symmetric ("
-                 + AtasBridgeVersion.Tag + ")")]
+    [Description(
+        "Setup C 流动性扫除反转标记　" + AtasBridgeVersion.Tag + "\n" +
+        "\n" +
+        "■ 这个指标做什么\n" +
+        "找「假突破 + 反转」的入场点。价格刺穿一处流动性池（前高/前低，也就是止损\n" +
+        "堆积的地方）把止损扫掉，然后迅速收回 —— 这是反转信号。指标把入场/止损/\n" +
+        "TP1/TP2 四条线直接画在图上，由你手动执行。不自动下单，不推送任何数据。\n" +
+        "\n" +
+        "■ 必须用 M5 图\n" +
+        "主逻辑按 5 分钟周期设计。挂到其它周期时左上角会显示红色警告，此时数值\n" +
+        "不可信，仅供观察。\n" +
+        "\n" +
+        "■ 图上各元素含义\n" +
+        "　· 红色横线 = BSL 买方流动性池（前高，空头止损堆积处）\n" +
+        "　· 绿色横线 = SSL 卖方流动性池（前低，多头止损堆积处）\n" +
+        "　· 线右端 xN = 有 N 个摆动点合并成这一条（等高/等低）。N>=2 时线会加粗，\n" +
+        "　　因为双顶/双底的止损更密集、信息量更高。若普遍出现 x8 以上，说明\n" +
+        "　　「等高等低合并容差」太宽，应调小。\n" +
+        "　· 灰色虚线 = 已被扫除过的池，不再触发信号\n" +
+        "　· 黄色小三角 = 阶段一预警：扫除正在发生（未确认，不要立刻进）\n" +
+        "　· 灰色小 X = 该次扫除已作废；鼠标悬停到那根 K 上会显示作废原因\n" +
+        "　· 绿线=入场　红线=止损　蓝虚线=TP1(1.5R)　蓝实线=TP2(对面最近的池)\n" +
+        "　· 信号右端标签：方向 | R值 | 盈亏比 | 建议仓位。淡色=弱信号，灰色=盈亏比不足\n" +
+        "\n" +
+        "■ 两阶段怎么配合（重要）\n" +
+        "扫除只持续几十秒，等 M5 收盘再提示最佳入场价已经跑掉，所以拆成两级：\n" +
+        "　阶段一（tick 级，不等收盘）：响预警音 + 画黄三角。此时只准备，不进场。\n" +
+        "　阶段二（M5 收盘判定）：收盘收回池内 + 主动量衰竭 + 出现吸收 → 响确认音\n" +
+        "　并画出完整的入场/止损/目标；不满足则响作废音（默认关闭）并画灰色 X。\n" +
+        "看到黄三角就把手放到键盘上，听到确认音再动手。\n" +
+        "\n" +
+        "■ 三个核心判据\n" +
+        "　· 穿透深度：太浅算触碰不算扫除；太深说明是真突破 → 见「最小/最大穿透」\n" +
+        "　· ADR 主动量衰竭比 = 扫除后累计|Delta| ÷ 扫除那根K的|Delta|。\n" +
+        "　　低 = 突破方力气用尽（好）；高 = 主动量还在持续（真突破，作废）。\n" +
+        "　　ADR 落在「达标阈值」与「作废阈值」之间会画出来但标 WEAK，\n" +
+        "　　这是特意留给你校准用的中间地带。\n" +
+        "　· 吸收：收回过程中某个价位有大额被动挂单吃掉主动单，说明有人在这里护盘。\n" +
+        "\n" +
+        "■ 上手建议\n" +
+        "　1. 先只看不做，确认池线位置与你自己读的前高前低一致\n" +
+        "　2. 池太多就加大「摆动点左右K数」；合并数普遍过大就减小「合并容差」\n" +
+        "　3. 信号太少就放宽「Delta尖峰分位」(5→10) 或「爆量倍数」(3→2)\n" +
+        "　4. 「账户权益」和「单笔风险」填你自己的真实数字，仓位标签才有意义\n" +
+        "\n" +
+        "■ 注意\n" +
+        "　· 仓位计算假设图表成交量口径是 BTC（币安 BTCUSDT 永续成立）\n" +
+        "　· 同一个池确认或作废后不再触发；仅「超时未收回」允许再触发 1 次\n" +
+        "　· 统计只用已收盘K线（不含当前未收盘K），因此复盘与实盘表现一致")]
     public class SweepMarker : Indicator
     {
         // ---- internal constants (deliberately not settings) ---------------
@@ -90,156 +144,156 @@ namespace AtasBridge
 
         // Bars required on each side of a swing point. Higher = fewer but more
         // significant pools; lower = more pools, more noise.
-        [Display(Name = "PivotBars", GroupName = "1 Pools", Order = 1,
-                 Description = "Bars on each side of a swing high/low")]
+        [Display(Name = "摆动点左右K数", GroupName = "1 流动性池", Order = 1,
+                 Description = "某根K的高点要高过左右各N根才算摆动高点。调大=池更少但更重要；调小=池更多也更嘈杂")]
         public int PivotBars { get; set; } = 5;
 
         // How far back pools stay relevant. Older liquidity is usually already
         // taken and no longer attracts price.
-        [Display(Name = "LookbackDays", GroupName = "1 Pools", Order = 2,
-                 Description = "Days of history to keep pools for")]
+        [Display(Name = "池回溯天数", GroupName = "1 流动性池", Order = 2,
+                 Description = "超过这个天数的池视为过期。更早的流动性通常已被取走，不再吸引价格")]
         public int LookbackDays { get; set; } = 3;
 
         // Two swings closer than this (in daily ATR) are the same liquidity
         // shelf: equal highs / equal lows. Merging them avoids double signals
         // and flags the stronger double top / double bottom pattern.
-        [Display(Name = "EqualTolerance", GroupName = "1 Pools", Order = 3,
-                 Description = "Equal high/low merge tolerance, x ATR(D1)")]
+        [Display(Name = "等高等低合并容差(×日ATR)", GroupName = "1 流动性池", Order = 3,
+                 Description = "两个同类摆动点价差小于此值即视为同一条流动性架并合并，线右端 xN 就是合并数。若普遍出现 x8 以上说明此值太宽，建议改 0.03~0.05")]
         public decimal EqualTolerance { get; set; } = 0.1m;
 
         // ================= settings: sweep detection ====================
 
         // Price must come this close to a pool before we watch it at all.
         // Pure performance / noise filter: far away pools cannot be swept now.
-        [Display(Name = "ArmDistance", GroupName = "2 Sweep", Order = 1,
-                 Description = "Distance at which a pool becomes armed, x ATR(M5)")]
+        [Display(Name = "预备距离(×5分ATR)", GroupName = "2 扫除检测", Order = 1,
+                 Description = "价格进入池的这个距离内才开始监控该池。纯降噪与性能过滤：离得远的池当下不可能被扫")]
         public decimal ArmDistance { get; set; } = 0.5m;
 
         // Minimum penetration to call it a sweep rather than a touch.
-        [Display(Name = "MinPenetration", GroupName = "2 Sweep", Order = 2,
-                 Description = "Minimum penetration beyond the pool, x ATR(M5)")]
+        [Display(Name = "最小穿透(×5分ATR)", GroupName = "2 扫除检测", Order = 2,
+                 Description = "至少要刺穿这么深才算扫除，否则只是触碰。调大=只认明确的插针")]
         public decimal MinPenetration { get; set; } = 0.05m;
 
         // Beyond this the move is a real breakout, not a stop run.
-        [Display(Name = "MaxPenetration", GroupName = "2 Sweep", Order = 3,
-                 Description = "Above this it is a genuine breakout, x ATR(M5)")]
+        [Display(Name = "最大穿透(×5分ATR)", GroupName = "2 扫除检测", Order = 3,
+                 Description = "刺穿超过这么深就是真突破而不是扫止损，该次直接作废")]
         public decimal MaxPenetration { get; set; } = 1.5m;
 
         // Delta spike percentile. A sweep is one-sided aggression, so the
         // sweeping bar's delta should sit in the tail of the recent
         // distribution (low tail for a long setup, high tail for a short).
-        [Display(Name = "DeltaPercentile", GroupName = "2 Sweep", Order = 4,
-                 Description = "Delta spike percentile, %")]
+        [Display(Name = "Delta尖峰分位(%)", GroupName = "2 扫除检测", Order = 4,
+                 Description = "扫除是单边猛攻，所以扫除那根K的Delta要落在近期分布的尾部：做多看低尾(5%)，做空看高尾(95%)。信号太少可放宽到 10")]
         public decimal DeltaPercentile { get; set; } = 5m;
 
         // Volume burst multiple over the recent median. Stop runs trade a lot.
-        [Display(Name = "VolMultiple", GroupName = "2 Sweep", Order = 5,
-                 Description = "Volume burst multiple over recent median")]
+        [Display(Name = "爆量倍数", GroupName = "2 扫除检测", Order = 5,
+                 Description = "当前K成交量需达到近期中位数的这个倍数。扫止损必然伴随放量。信号太少可降到 2")]
         public decimal VolMultiple { get; set; } = 3.0m;
 
         // Sample size for the percentile and the median above.
-        [Display(Name = "DeltaVolLookback", GroupName = "2 Sweep", Order = 6,
-                 Description = "Closed bars used for percentile and median")]
+        [Display(Name = "分位与中位回看K数", GroupName = "2 扫除检测", Order = 6,
+                 Description = "计算上面分位数与中位数的样本量。只取已收盘K线，不含当前未收盘K（避免前视偏差）")]
         public int DeltaVolLookback { get; set; } = 50;
 
         // ================= settings: confirmation ======================
 
         // How long price may stay outside the pool before we give up. A real
         // sweep snaps back fast.
-        [Display(Name = "ReclaimBars", GroupName = "3 Confirm", Order = 1,
-                 Description = "Bars allowed to reclaim the pool")]
+        [Display(Name = "收回时限(K数)", GroupName = "3 确认", Order = 1,
+                 Description = "价格最多允许在池外停留几根K。真扫除会很快收回；超时即作废")]
         public int ReclaimBars { get; set; } = 3;
 
         // ADR = aggression decay ratio: cumulative |delta| after the sweep bar
         // divided by the sweep bar |delta|. Low ADR means the aggression died
         // out, which is what a failed breakout looks like.
-        [Display(Name = "AdrPass", GroupName = "3 Confirm", Order = 2,
-                 Description = "ADR at or below this is a clean signal")]
+        [Display(Name = "ADR达标阈值", GroupName = "3 确认", Order = 2,
+                 Description = "ADR = 扫除后累计|Delta| ÷ 扫除那根K的|Delta|。低于此值算干净信号（突破方力气用尽）")]
         public decimal AdrPass { get; set; } = 0.8m;
 
         // Above this the aggression is still running: treat as real breakout.
-        [Display(Name = "AdrInvalidate", GroupName = "3 Confirm", Order = 3,
-                 Description = "ADR above this invalidates the setup")]
+        [Display(Name = "ADR作废阈值", GroupName = "3 确认", Order = 3,
+                 Description = "ADR 高于此值说明主动量还在持续，判定为真突破并作废。介于达标与作废之间会画出来但标 WEAK")]
         public decimal AdrInvalidate { get; set; } = 1.5m;
 
         // Passive side / aggressive side volume at one price. High ratio means
         // limit orders absorbed the market orders, i.e. someone defended.
-        [Display(Name = "AbsorptionRatio", GroupName = "3 Confirm", Order = 4,
-                 Description = "Passive/aggressive volume ratio at one price")]
+        [Display(Name = "吸收比", GroupName = "3 确认", Order = 4,
+                 Description = "同一价位上被动挂单量 ÷ 主动成交量。比值高说明限价单吃掉了市价单，即有人在此护盘")]
         public decimal AbsorptionRatio { get; set; } = 2.0m;
 
         // Absorption below this size is noise, not a real defender.
-        [Display(Name = "AbsorptionMinBtc", GroupName = "3 Confirm", Order = 5,
-                 Description = "Minimum absorbed size at one price, BTC")]
+        [Display(Name = "吸收最小量(BTC)", GroupName = "3 确认", Order = 5,
+                 Description = "单一价位吸收量低于此值视为噪声，不算真正的护盘方")]
         public decimal AbsorptionMinBtc { get; set; } = 5.0m;
 
         // ================= settings: trade math ========================
 
         // Stop sits this far beyond the sweep extreme so a retest does not
         // clip it.
-        [Display(Name = "StopBuffer", GroupName = "4 Trade", Order = 1,
-                 Description = "Stop buffer beyond the sweep extreme, x ATR(M5)")]
+        [Display(Name = "止损缓冲(×5分ATR)", GroupName = "4 交易", Order = 1,
+                 Description = "止损放在扫除最低/最高点之外这么远，避免回踩时被扫掉")]
         public decimal StopBuffer { get; set; } = 0.3m;
 
         // Too tight a stop gets taken out by noise.
-        [Display(Name = "MinStopPct", GroupName = "4 Trade", Order = 2,
-                 Description = "Reject the signal if the stop is closer than this, %")]
+        [Display(Name = "最小止损距离(%)", GroupName = "4 交易", Order = 2,
+                 Description = "止损比这还近就不画信号：太紧会被正常波动打掉")]
         public decimal MinStopPct { get; set; } = 0.15m;
 
         // Too wide a stop makes position size meaningless.
-        [Display(Name = "MaxStopPct", GroupName = "4 Trade", Order = 3,
-                 Description = "Reject the signal if the stop is wider than this, %")]
+        [Display(Name = "最大止损距离(%)", GroupName = "4 交易", Order = 3,
+                 Description = "止损比这还远就不画信号：太宽会让仓位计算失去意义")]
         public decimal MaxStopPct { get; set; } = 0.8m;
 
         // Below this reward/risk the trade is drawn but greyed out.
-        [Display(Name = "MinRR", GroupName = "4 Trade", Order = 4,
-                 Description = "Minimum reward/risk before the signal is greyed")]
+        [Display(Name = "最低盈亏比", GroupName = "4 交易", Order = 4,
+                 Description = "盈亏比低于此值仍会画出来，但整组线变灰并标注「RR LOW」")]
         public decimal MinRR { get; set; } = 2.0m;
 
         // Manual account size, used only for the position size label.
-        [Display(Name = "AccountEquity", GroupName = "4 Trade", Order = 5,
-                 Description = "Account equity in USD, manual input")]
+        [Display(Name = "账户权益(USD)", GroupName = "4 交易", Order = 5,
+                 Description = "手动填入你的真实账户资金，仅用于计算仓位标签")]
         public decimal AccountEquity { get; set; } = 10000m;
 
         // Risk per trade as a percentage of equity.
-        [Display(Name = "RiskPct", GroupName = "4 Trade", Order = 6,
-                 Description = "Risk per trade, % of equity")]
+        [Display(Name = "单笔风险(%)", GroupName = "4 交易", Order = 6,
+                 Description = "单笔愿承担的风险占权益的百分比。仓位 = 权益×风险% ÷ 止损距离，向下取整到 0.001 BTC")]
         public decimal RiskPct { get; set; } = 1.0m;
 
         // ================= settings: display ==========================
 
-        [Display(Name = "ShowInvalidated", GroupName = "5 Display", Order = 1,
-                 Description = "Draw grey X marks for invalidated sweeps")]
+        [Display(Name = "显示作废标记", GroupName = "5 显示", Order = 1,
+                 Description = "在作废的扫除K上画灰色小X，鼠标悬停显示作废原因")]
         public bool ShowInvalidated { get; set; } = true;
 
-        [Display(Name = "ShowPoolLines", GroupName = "5 Display", Order = 2,
-                 Description = "Draw the liquidity pool levels")]
+        [Display(Name = "显示池线", GroupName = "5 显示", Order = 2,
+                 Description = "画出流动性池的价格水平线")]
         public bool ShowPoolLines { get; set; } = true;
 
-        [Display(Name = "SignalExtendBars", GroupName = "5 Display", Order = 3,
-                 Description = "How far right the entry/stop/TP lines extend")]
+        [Display(Name = "信号线延伸K数", GroupName = "5 显示", Order = 3,
+                 Description = "入场/止损/目标三条线从确认K向右延伸多少根")]
         public int SignalExtendBars { get; set; } = 20;
 
-        [Display(Name = "BslColor", GroupName = "5 Display", Order = 4,
-                 Description = "Buy side liquidity (swing high) pool color")]
+        [Display(Name = "BSL颜色(前高/空头止损)", GroupName = "5 显示", Order = 4,
+                 Description = "买方流动性池（摆动高点）的线条颜色")]
         public SeriesColor BslColor { get; set; } = MakeColor(255, 242, 56, 90);
 
-        [Display(Name = "SslColor", GroupName = "5 Display", Order = 5,
-                 Description = "Sell side liquidity (swing low) pool color")]
+        [Display(Name = "SSL颜色(前低/多头止损)", GroupName = "5 显示", Order = 5,
+                 Description = "卖方流动性池（摆动低点）的线条颜色")]
         public SeriesColor SslColor { get; set; } = MakeColor(255, 8, 153, 129);
 
         // ================= settings: sound ============================
 
-        [Display(Name = "EnableSoundAlert", GroupName = "6 Sound", Order = 1,
-                 Description = "Stage 1 warning sound, sweep in progress")]
+        [Display(Name = "预警音(扫除进行中)", GroupName = "6 声音", Order = 1,
+                 Description = "阶段一：扫除正在发生。听到后做准备，不要立刻进场")]
         public bool EnableSoundAlert { get; set; } = true;
 
-        [Display(Name = "EnableSoundConfirm", GroupName = "6 Sound", Order = 2,
-                 Description = "Stage 2 confirmation sound, entry is valid")]
+        [Display(Name = "确认音(可入场)", GroupName = "6 声音", Order = 2,
+                 Description = "阶段二：已收回且条件齐备，这才是动手的时刻")]
         public bool EnableSoundConfirm { get; set; } = true;
 
-        [Display(Name = "EnableSoundInvalid", GroupName = "6 Sound", Order = 3,
-                 Description = "Invalidation sound, stop waiting")]
+        [Display(Name = "作废音(别等了)", GroupName = "6 声音", Order = 3,
+                 Description = "该次扫除已作废。默认关闭，避免震荡行情里噪音过多")]
         public bool EnableSoundInvalid { get; set; } = false;
 
         // ===================== internal state =========================
@@ -314,7 +368,7 @@ namespace AtasBridge
         private int _lastClosedProcessed = -1;
         private int _logCount;
 
-        private string _lastEvent = "none";
+        private string _lastEvent = "暂无";
         private int _todayConfirmed, _todayInvalidated;
         private DateTime _todayDate = DateTime.MinValue;
         private bool _periodOk = true;
@@ -378,7 +432,7 @@ namespace AtasBridge
             _dayHigh = _dayLow = _prevDayClose = _curDayClose = 0m;
             _nextPoolId = 1;
             _lastClosedProcessed = -1;
-            _lastEvent = "none";
+            _lastEvent = "暂无";
             _todayConfirmed = _todayInvalidated = 0;
             _todayDate = DateTime.MinValue;
             _logCount = 0;
@@ -708,8 +762,8 @@ namespace AtasBridge
                 catch (Exception ex) { LogEx("sweep time", ex); p.SweepTimeUtc = DateTime.UtcNow; }
 
                 _alertMarks.Add(new AlertMark { Bar = bar, IsLong = isLong, Price = isLong ? c.Low : c.High });
-                _lastEvent = "ALERT " + (isLong ? "SSL " : "BSL ") + Fmt(p.Price) +
-                             (isLong ? " (long setup forming)" : " (short setup forming)");
+                _lastEvent = "预警 " + (isLong ? "SSL " : "BSL ") + Fmt(p.Price) +
+                             (isLong ? "（多头 setup 形成中）" : "（空头 setup 形成中）");
                 Log(_lastEvent + " bar=" + bar + " delta=" + Fmt(c.Delta) + " vol=" + Fmt(c.Volume));
                 PlaySound(SND_ALERT, EnableSoundAlert, p.Id, isLong, bar, "alert",
                           "SweepMarker: " + _lastEvent);
@@ -827,7 +881,7 @@ namespace AtasBridge
                 Price = p.SweepExtremePrice, Reason = reason
             });
             _todayInvalidated++;
-            _lastEvent = "INVALID " + ReasonText(reason) + " pool=" + Fmt(p.Price) + " ADR=" + adr.ToString("0.00");
+            _lastEvent = "作废 " + ReasonText(reason) + " 池=" + Fmt(p.Price) + " ADR=" + adr.ToString("0.00");
             Log(_lastEvent + " bar=" + bar + " retrigger=" + p.RetriggerCount);
             PlaySound(SND_INVALID, EnableSoundInvalid, p.Id, isLong, bar, "invalid",
                       "SweepMarker: " + _lastEvent);
@@ -880,9 +934,9 @@ namespace AtasBridge
             _signals.Add(sig);
             _todayConfirmed++;
 
-            _lastEvent = (isLong ? "CONFIRM LONG " : "CONFIRM SHORT ") + Fmt(entry) +
-                         " RR=" + rr.ToString("0.0") + " ADR=" + adr.ToString("0.00") +
-                         (sig.Weak ? " WEAK" : "") + (sig.RrLow ? " RR-LOW" : "");
+            _lastEvent = (isLong ? "确认 做多 " : "确认 做空 ") + Fmt(entry) +
+                         " 盈亏比=" + rr.ToString("0.0") + " ADR=" + adr.ToString("0.00") +
+                         (sig.Weak ? " 弱信号" : "") + (sig.RrLow ? " 盈亏比不足" : "");
             Log(_lastEvent + " bar=" + bar + " stop=" + Fmt(stop) + " tp2=" + Fmt(tp2) +
                 " size=" + size.ToString("0.000"));
             PlaySound(SND_CONFIRM, EnableSoundConfirm, p.Id, isLong, bar, "confirm",
@@ -897,7 +951,7 @@ namespace AtasBridge
                 Price = p.SweepExtremePrice, Reason = reason
             });
             _todayInvalidated++;
-            _lastEvent = "REJECT " + ReasonText(reason) + " stop=" + stopPct.ToString("0.00") + "%";
+            _lastEvent = "不画信号 " + ReasonText(reason) + " 止损距离=" + stopPct.ToString("0.00") + "%";
             Log(_lastEvent + " bar=" + bar);
         }
 
@@ -933,15 +987,16 @@ namespace AtasBridge
             catch (Exception ex) { LogEx("AddAlert " + evt, ex); }
         }
 
+        // Shown in the panel and on hover over the grey X, so Chinese.
         private static string ReasonText(InvalidReason r) => r switch
         {
-            InvalidReason.Timeout => "no reclaim in time",
-            InvalidReason.TooDeep => "penetration too deep",
-            InvalidReason.AdrHigh => "ADR too high",
-            InvalidReason.SecondBreak => "second break",
-            InvalidReason.StopTooClose => "stop too close",
-            InvalidReason.StopTooFar => "stop too far",
-            _ => "unknown"
+            InvalidReason.Timeout => "超时未收回",
+            InvalidReason.TooDeep => "穿透过深(真突破)",
+            InvalidReason.AdrHigh => "ADR过高(主动量仍在)",
+            InvalidReason.SecondBreak => "二次破位",
+            InvalidReason.StopTooClose => "止损过近",
+            InvalidReason.StopTooFar => "止损过远",
+            _ => "未知"
         };
 
         private string Fmt(decimal v) => v.ToString("0.##");
@@ -1063,12 +1118,12 @@ namespace AtasBridge
                 ctx.DrawLine(new RenderPen(tpCol, 1.5f, DashStyle.Dash), x1, cc.GetYByPrice(s.Tp1, false), x2, cc.GetYByPrice(s.Tp1, false));
                 ctx.DrawLine(new RenderPen(tpCol, 2f), x1, cc.GetYByPrice(s.Tp2, false), x2, cc.GetYByPrice(s.Tp2, false));
 
-                string label = (s.IsLong ? "LONG" : "SHORT") +
+                string label = (s.IsLong ? "做多" : "做空") +
                                " | R=" + s.R.ToString("0.#") +
-                               " | RR=" + s.Rr.ToString("0.0") +
-                               " | Size=" + s.SizeBtc.ToString("0.000") + " BTC";
-                if (s.Weak) label += " | WEAK";
-                if (s.RrLow) label += " | RR LOW";
+                               " | 盈亏比 " + s.Rr.ToString("0.0") +
+                               " | 仓位 " + s.SizeBtc.ToString("0.000") + " BTC";
+                if (s.Weak) label += " | 弱信号";
+                if (s.RrLow) label += " | 盈亏比不足";
 
                 int ye = cc.GetYByPrice(s.Entry, false);
                 var sz = ctx.MeasureString(label, _fontSmall);
@@ -1099,11 +1154,15 @@ namespace AtasBridge
             }
 
             var lines = new List<string>();
+            // The English warning text is fixed by the task card; the Chinese
+            // hint is appended rather than replacing it.
             if (!_periodOk)
-                lines.Add("SweepMarker requires M5 chart" + (_periodText.Length > 0 ? " (current " + _periodText + ")" : ""));
-            lines.Add("Pools: BSL " + bsl + " / SSL " + ssl);
-            lines.Add("Last: " + _lastEvent);
-            lines.Add("Today: confirmed " + _todayConfirmed + " / invalidated " + _todayInvalidated);
+                lines.Add("SweepMarker requires M5 chart"
+                          + (_periodText.Length > 0 ? "  (当前 " + _periodText + ")" : "")
+                          + "  请切回 5 分钟图");
+            lines.Add("监控中的池：BSL " + bsl + " 条 / SSL " + ssl + " 条");
+            lines.Add("最近事件：" + _lastEvent);
+            lines.Add("今日：确认 " + _todayConfirmed + " 个 / 作废 " + _todayInvalidated + " 个");
 
             // Coordinates are absolute canvas coordinates, not panel relative,
             // and ClipBounds starts at (0,0) - AtasLiquidations hit that trap.

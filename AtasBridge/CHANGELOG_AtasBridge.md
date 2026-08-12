@@ -1616,3 +1616,62 @@ PresentationCore（`SeriesColor` = `System.Drawing.Color`），Platform 版引�
 **未完成**：ATAS 内的运行时验证（加载、池线绘制、3 天回放、声音、M15 周期警告）
 尚未执行 —— 需要覆盖指标目录并重启 ATAS，而 Sea 的 ATAS 正在使用中，未获授权
 不动。部署命令与待验证清单见 `reports/SWEEP_9G_20260812.md`。
+
+---
+
+## v2026.08.12-2（2026-08-12，SweepMarker：界面中文化 + 关于页使用说明）
+
+### 已完成的运行时验证（承接 -1）
+
+Sea 关闭 ATAS 后完成部署，并在 ATAS X 里加载成功，截图确认：
+
+- **验证 2 通过**：指标出现在 `Setups` 分组，加载到 BTCUSDT@BinanceFutures M5
+  图不报错，设置面板 6 个分组顺序正确
+- **验证 3 通过**：池线正常绘制，面板显示 `Pools: BSL 15 / SSL 15`，共 30 条，
+  数量合理（不满屏也不是一条没有）；等高等低合并生效，线右端出现
+  `x2 x3 x4 x5 x8 x9 x13` 标注，`>=2` 的线明显加粗
+
+### 由截图发现的调参问题（非缺陷）
+
+有一条池标注 `x13`，即 13 个摆动点被合并成一条"等高/等低"。这不可能是真的
+双顶双底，说明 `EqualTolerance x ATR(D1)` 容差偏宽：BTC 日线 ATR 约 1500~2000，
+乘 0.1 得 150~200 美元，在 M5 尺度上把一段震荡区里十几个不同摆动点糊成了一条。
+默认值保持 0.1 不改（任务卡指定），但参数说明里写明"普遍出现 x8 以上说明太宽，
+建议 0.03~0.05"，并写进关于页的上手建议。
+
+### 界面中文化
+
+Sea 明确要求参数用中文，故本版把**面向用户的字符串**全部改为中文：
+`DisplayName` / `GroupName` / `Description`、图上信号标签、左上角面板文字、
+作废原因（鼠标悬停显示）。分组名改为 `1 流动性池` / `2 扫除检测` / `3 确认` /
+`4 交易` / `5 显示` / `6 声音`。
+
+**代码注释仍保持英文 ASCII** —— v5.1 那条约定的真实动因是"PowerShell 编码
+损坏中文注释"，针对的是注释与编辑方式，不是 UI 字符串（`AtasLiquidations.cs`
+的 `DisplayName` 本来就是中文）。文件因此变成 UTF-8 无 BOM，与
+`AtasBridge.cs` / `AtasLiquidations.cs` 一致（三者实测均无 BOM，Roslyn 默认按
+UTF-8 读取）。文件头加了 ENCODING NOTE 说明：编辑此文件要用 UTF-8 编辑器或
+scp 传输，**不要经 PowerShell 管道**。
+
+### 关于页使用说明
+
+`[Description]` 从一行扩成完整中文使用指南，ATAS 指标窗口的"关于"页直接显示。
+含 7 节：做什么 / 必须 M5 / 图上各元素含义 / 两阶段怎么配合 / 三个核心判据 /
+上手建议 / 注意事项。
+
+### 构建脆弱点修复（顺带）
+
+`AtasBridge.Platform.csproj` 里 `System.Drawing.Common` 与 `PresentationCore`
+的 HintPath 原本把版本号写死成 `Microsoft.WindowsDesktop.App\10.0.10`。本会话
+期间机器上的 .NET 被更新（WindowsDesktop.App 10.0.10 -> 10.0.11，SDK
+10.0.302 -> 10.0.303），该目录随之消失，Platform 版构建立刻 `MSB3245` 找不到
+程序集，紧接着 `CS0234 命名空间 System.Windows 中不存在 Media`。改为通配
+`10.*` 由 MSBuild 求值时展开，下次打补丁不会再断。已在 csproj 注释里写明失效
+模式与限制（若同时存在多个 10.x 运行时会因同名引用报 CS1704，届时需收窄）。
+
+### 验证
+
+双平台 `Clean,Compile` 均 exit 0、0 错误（仅 `AtasBridge.cs` 既有的 11 个
+CS8602/CS0618 警告）。产物字符串校验：`[Description]`/`[Display]` 的中文以
+UTF-8 存在自定义特性 blob 中，代码内字符串常量以 UTF-16 存在 #US 堆中，
+两类分别按对应编码搜索全部命中、无乱码替换符。

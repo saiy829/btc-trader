@@ -59,14 +59,21 @@
     <!-- 例外：不引用 ATAS Platform 目录里自带的 System.Drawing.Common.dll，
          那份版本过时会导致 Microsoft.WindowsDesktop.App 版本链解析失败
          （CHANGELOG v2026.07.06-5 记录的 Avalonia 假报错就是这么来的）。 -->
-    <Reference Include="System.Drawing.Common">
-      <HintPath>C:\Program Files\dotnet\shared\Microsoft.WindowsDesktop.App\10.0.10\System.Drawing.Common.dll</HintPath>
+    <!-- 2026-08-12（9G）：原来这里把版本号写死成 10.0.10，本会话期间机器上的
+         .NET 被更新（WindowsDesktop.App 10.0.10 -> 10.0.11，SDK 10.0.302 ->
+         10.0.303），那个目录随之消失，构建立刻报 MSB3245 找不到程序集，
+         紧接着是 CS0234「命名空间 System.Windows 中不存在 Media」。
+         改成通配 10.* 由 MSBuild 在求值时展开，下次 .NET 打补丁不会再断。
+         注意：若机器上同时存在多个 10.x 的 WindowsDesktop 运行时，通配会
+         展开出多个同名程序集引用而报 CS1704，届时需要收窄成具体版本。
+         另外不能改用 <UseWPF>true</UseWPF>：那要求 TargetFramework 带
+         -windows 后缀（NETSDK1136）。 -->
+    <Reference Include="$(ProgramFiles)\dotnet\shared\Microsoft.WindowsDesktop.App\10.*\System.Drawing.Common.dll">
       <Private>false</Private>
     </Reference>
     <!-- ValueDataSeries.Color 在普通版 ATAS 是 System.Windows.Media.Color，
-         定义在这里（见上方 PropertyGroup 的说明） -->
-    <Reference Include="PresentationCore">
-      <HintPath>C:\Program Files\dotnet\shared\Microsoft.WindowsDesktop.App\10.0.10\PresentationCore.dll</HintPath>
+         定义在 PresentationCore 里（见上方 PropertyGroup 的说明） -->
+    <Reference Include="$(ProgramFiles)\dotnet\shared\Microsoft.WindowsDesktop.App\10.*\PresentationCore.dll">
       <Private>false</Private>
     </Reference>
   </ItemGroup>
