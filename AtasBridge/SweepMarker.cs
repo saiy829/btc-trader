@@ -283,6 +283,14 @@ namespace AtasBridge
                  Description = "入场/止损/目标三条线从确认K向右延伸多少根")]
         public int SignalExtendBars { get; set; } = 20;
 
+        [Display(Name = "显示线条文字", GroupName = "5 显示", Order = 7,
+                 Description = "在止损/TP1/TP2 线的右端标出名称与价格。线多时可关掉减少拥挤")]
+        public bool ShowLineLabels { get; set; } = true;
+
+        [Display(Name = "显示胜率统计", GroupName = "5 显示", Order = 8,
+                 Description = "面板追加做多/做空的触及TP1、到达TP2、止损比例。按已结束的信号统计（还挂在TP1上的算进行中，不计入分母）。同一根K同时触及止损与目标时按止损计，宁可低估不高估")]
+        public bool ShowStats { get; set; } = true;
+
         [Display(Name = "BSL颜色(前高/空头止损)", GroupName = "5 显示", Order = 4,
                  Description = "买方流动性池（摆动高点）的线条颜色")]
         public SeriesColor BslColor { get; set; } = MakeColor(255, 242, 56, 90);
@@ -371,6 +379,12 @@ namespace AtasBridge
 
         private enum InvalidReason { None, Timeout, TooDeep, AdrHigh, SecondBreak, StopTooClose, StopTooFar }
 
+        // Open  = still running, no level touched yet that resolves it
+        // Tp1   = TP1 touched, still waiting for TP2 or the stop
+        // Tp2   = TP2 reached -> full win
+        // Stop  = stop hit -> loss
+        private enum Outcome { Open, Tp1, Tp2, Stop }
+
         private sealed class Signal
         {
             public int Bar;
@@ -379,6 +393,10 @@ namespace AtasBridge
             public bool Weak;
             public bool RrLow;
             public int PoolId;
+            // outcome tracking, filled in bar by bar after the signal fired
+            public Outcome State = Outcome.Open;
+            public bool HitTp1;
+            public int ResolvedBar = -1;
         }
 
         private sealed class InvalidMark
@@ -641,7 +659,82 @@ namespace AtasBridge
             }
 
             StageTwo(i);
+            TrackOutcomes(i);
         }
+
+        // Walks every still-open signal forward one closed bar at a time and
+        // decides whether TP1 / TP2 / the stop got touched. Only bars AFTER the
+        // signal bar are considered, so this cannot influence the signal itself.
+        //
+        // When one bar spans both the stop and a target, the stop is assumed to
+        // have been hit first. Intrabar order is unknowable from OHLC, and for a
+        // hit-rate table it is the honest direction to round: it can understate
+        // the win rate, never inflate it.
+        private void TrackOutcomes(int i)
+        {
+            var c = SafeCandle(i);
+            if (c == null) return;
+
+            foreach (var s in _signals)
+            {
+                if (s.State == Outcome.Tp2 || s.State == Outcome.Stop) continue;
+                if (i <= s.Bar) continue;
+
+                bool stopHit = s.IsLong ? c.Low <= s.Stop : c.High >= s.Stop;
+                bool tp2Hit = s.IsLong ? c.High >= s.Tp2 : c.Low <= s.Tp2;
+                bool tp1Hit = s.IsLong ? c.High >= s.Tp1 : c.Low <= s.Tp1;
+
+                if (stopHit)
+                {
+                    if (tp1Hit) s.HitTp1 = true;   // touched before being stopped
+                    s.State = Outcome.Stop;
+                    s.ResolvedBar = i;
+                    continue;
+                }
+                if (tp2Hit)
+                {
+                    s.HitTp1 = true;               // TP2 is beyond TP1 by construction
+                    s.State = Outcome.Tp2;
+                    s.ResolvedBar = i;
+                    continue;
+                }
+                if (tp1Hit)
+                {
+                    s.HitTp1 = true;
+                    s.State = Outcome.Tp1;
+                }
+            }
+        }
+
+        // Hit rates per direction. "已结" counts signals that reached TP2 or the
+        // stop; a signal sitting on TP1 is still running, so it is excluded from
+        // the denominator to avoid flattering the numbers.
+        private string StatsLine(bool isLong)
+        {
+            int resolved = 0, tp1 = 0, tp2 = 0, stopped = 0, running = 0;
+            foreach (var s in _signals)
+            {
+                if (s.IsLong != isLong) continue;
+                if (s.State == Outcome.Tp2) { resolved++; tp2++; tp1++; }
+                else if (s.State == Outcome.Stop)
+                {
+                    resolved++; stopped++;
+                    if (s.HitTp1) tp1++;
+                }
+                else running++;
+            }
+            string head = isLong ? "做多" : "做空";
+            if (resolved == 0)
+                return head + "：已结 0 笔　进行中 " + running + " 笔";
+            return head + "：已结 " + resolved + " 笔　"
+                   + "触及TP1 " + Pct(tp1, resolved) + "　"
+                   + "到达TP2 " + Pct(tp2, resolved) + "　"
+                   + "止损 " + Pct(stopped, resolved)
+                   + (running > 0 ? "　进行中 " + running + " 笔" : "");
+        }
+
+        private static string Pct(int n, int d) =>
+            d <= 0 ? "-" : (n * 100m / d).ToString("0") + "%(" + n + ")";
 
         // Returns null on any out of range / throwing access. Every caller
         // checks for null; that is deliberate, a missing candle must never
@@ -1302,12 +1395,34 @@ namespace AtasBridge
                                " | 仓位 " + s.SizeBtc.ToString("0.000") + " BTC";
                 if (s.Weak) label += " | 弱信号";
                 if (s.RrLow) label += " | 盈亏比不足";
+                // Outcome, once the market has resolved it. Makes a replay
+                // readable at a glance instead of having to trace each line.
+                if (s.State == Outcome.Tp2) label += " | 已到TP2";
+                else if (s.State == Outcome.Stop) label += s.HitTp1 ? " | 触TP1后止损" : " | 已止损";
+                else if (s.State == Outcome.Tp1) label += " | 已触TP1";
 
-                int ye = cc.GetYByPrice(s.Entry, false);
-                var sz = ctx.MeasureString(label, _fontSmall);
-                ctx.FillRectangle(Color.FromArgb(190, 0, 0, 0), new Rectangle(x2 + 4, ye - sz.Height / 2 - 2, sz.Width + 6, sz.Height + 4));
-                ctx.DrawString(label, _fontSmall, entryCol, x2 + 7, ye - sz.Height / 2);
+                DrawRightLabel(ctx, x2, cc.GetYByPrice(s.Entry, false), label, entryCol);
+
+                // 2026-08-12 (Sea): the SL / TP1 / TP2 lines used to be unlabelled,
+                // so you had to read the price axis to know which was which.
+                if (ShowLineLabels)
+                {
+                    DrawRightLabel(ctx, x2, cc.GetYByPrice(s.Stop, false),
+                                   "止损 " + s.Stop.ToString("0.#"), stopCol);
+                    DrawRightLabel(ctx, x2, cc.GetYByPrice(s.Tp1, false),
+                                   "TP1 " + s.Tp1.ToString("0.#") + " (1.5R)", tpCol);
+                    DrawRightLabel(ctx, x2, cc.GetYByPrice(s.Tp2, false),
+                                   "TP2 " + s.Tp2.ToString("0.#") + " (" + s.Rr.ToString("0.0") + "R)", tpCol);
+                }
             }
+        }
+
+        private void DrawRightLabel(RenderContext ctx, int x, int y, string text, Color col)
+        {
+            var sz = ctx.MeasureString(text, _fontSmall);
+            ctx.FillRectangle(Color.FromArgb(190, 0, 0, 0),
+                new Rectangle(x + 4, y - sz.Height / 2 - 2, sz.Width + 6, sz.Height + 4));
+            ctx.DrawString(text, _fontSmall, col, x + 7, y - sz.Height / 2);
         }
 
         private int HoverBar()
@@ -1346,6 +1461,11 @@ namespace AtasBridge
             // The whole-series totals are what you actually want when reviewing.
             lines.Add("今日：确认 " + _todayConfirmed + " 个 / 作废 " + _todayInvalidated
                       + " 个　　全图累计：确认 " + _totalConfirmed + " 个 / 作废 " + _totalInvalidated + " 个");
+            if (ShowStats)
+            {
+                lines.Add(StatsLine(true));
+                lines.Add(StatsLine(false));
+            }
 
             int w = 0;
             foreach (var l in lines) w = Math.Max(w, ctx.MeasureString(l, _font).Width);
