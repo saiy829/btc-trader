@@ -373,9 +373,47 @@ namespace AtasBridge
         private DateTime _todayDate = DateTime.MinValue;
         private bool _periodOk = true;
         private string _periodText = "";
+        private bool _historyDone;      // first full pass over history finished
+        private bool _soundsAllowed;    // set per OnCalculate, see the bugfix note
 
-        private static readonly RenderFont _font = new("Arial", 11f);
-        private static readonly RenderFont _fontSmall = new("Arial", 10f);
+        // OFT.Rendering's RenderFont does NO font fallback: a family without CJK
+        // glyphs draws Chinese as tofu boxes. Arial (what AtasBridge and
+        // AtasLiquidations use) has no CJK coverage - they only ever drew ASCII,
+        // so nobody noticed until this indicator's panel went Chinese.
+        // ATAS's own settings dialog renders Chinese fine because that WPF layer
+        // does fall back; the custom drawing layer does not.
+        // Probing rather than hardcoding because this box is a trimmed Windows
+        // IoT LTSC image: it has "Microsoft YaHei UI" but NOT "Microsoft YaHei",
+        // "SimSun" or "SimHei" (153 fonts installed in total).
+#pragma warning disable CA1416
+        private static readonly string UiFontFamily = ResolveFontFamily();
+
+        private static string ResolveFontFamily()
+        {
+            string[] prefs =
+            {
+                "Microsoft YaHei UI", "Microsoft YaHei", "SimSun", "SimHei",
+                "Malgun Gothic", "Yu Gothic", "Segoe UI", "Arial"
+            };
+            try
+            {
+                using var col = new System.Drawing.Text.InstalledFontCollection();
+                var have = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var f in col.Families) have.Add(f.Name);
+                foreach (var p in prefs)
+                    if (have.Contains(p)) return p;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[SweepMarker] font probe failed "
+                                  + ex.GetType().Name + ": " + ex.Message);
+            }
+            return "Arial";
+        }
+#pragma warning restore CA1416
+
+        private static readonly RenderFont _font = new(UiFontFamily, 11f);
+        private static readonly RenderFont _fontSmall = new(UiFontFamily, 10f);
 
         public SweepMarker() : base(true)
         {
@@ -436,6 +474,8 @@ namespace AtasBridge
             _todayConfirmed = _todayInvalidated = 0;
             _todayDate = DateTime.MinValue;
             _logCount = 0;
+            _historyDone = false;
+            _soundsAllowed = false;
         }
 
         // ===================== main entry point ========================
@@ -450,14 +490,45 @@ namespace AtasBridge
                     CheckPeriod();
                 }
 
-                // Close out every bar that finished since the last call. This
-                // single path serves both the historical pass and live ticks,
-                // which is what keeps replay and live identical.
-                while (_lastClosedProcessed < CurrentBar - 1)
+                // BUGFIX 2026-08-12 (v2026.08.12-3): this block used to read
+                //     while (_lastClosedProcessed < CurrentBar - 1) ...
+                //     if (bar == CurrentBar) RealtimeStageOne(CurrentBar);
+                // which was wrong in two ways and produced ZERO signals over a
+                // 3 day replay:
+                //
+                //  (a) During a historical pass ATAS calls OnCalculate for
+                //      bar = 0..N while CurrentBar already equals N. So
+                //      "bar == CurrentBar" was true only on the very last call,
+                //      and stage 1 was therefore evaluated for exactly one bar
+                //      of the whole chart. Pools were still built (that is why
+                //      the pool lines looked fine) but nothing ever entered
+                //      Watch, so stage 2 had nothing to confirm or invalidate.
+                //
+                //  (b) The while bound used CurrentBar instead of bar, so on the
+                //      very first call every bar was closed out at once, and
+                //      ClosedStats() - which was also bounded by CurrentBar -
+                //      computed its percentiles over the ENTIRE chart including
+                //      bars in the future of the bar being evaluated. That is
+                //      look-ahead, exactly what the card warned about.
+                //
+                // Both are fixed by making everything relative to `bar`, never
+                // to CurrentBar. Live and replay now share one code path for
+                // real: per tick ATAS calls with bar == CurrentBar repeatedly,
+                // during history bar simply walks forward.
+                while (_lastClosedProcessed < bar - 1)
                     ProcessClosedBar(++_lastClosedProcessed);
 
-                if (bar == CurrentBar)
-                    RealtimeStageOne(CurrentBar);
+                // Sounds must not fire while the indicator is grinding through
+                // history on load, otherwise adding it to a 3 day chart plays a
+                // burst of alerts for events that are long gone. They are
+                // enabled once the first full pass is done, which is also what
+                // makes ATAS bar-replay audible: replay appends bars, so each
+                // new bar arrives with bar == CurrentBar after history is done.
+                _soundsAllowed = _historyDone && bar >= CurrentBar;
+
+                StageOne(bar);
+
+                if (bar >= CurrentBar) _historyDone = true;
             }
             catch (Exception ex)
             {
@@ -674,12 +745,16 @@ namespace AtasBridge
 
         // ===================== statistics over CLOSED bars =============
 
-        // Both helpers deliberately stop at CurrentBar-1. Including the open
-        // bar would leak the outcome into the threshold: classic look-ahead.
-        private bool ClosedStats(out decimal loQ, out decimal hiQ, out decimal volMedian)
+        // Bounded by evalBar-1, i.e. only bars that closed BEFORE the bar being
+        // evaluated. Including the bar itself would leak its outcome into the
+        // threshold, and using CurrentBar (as this did before v2026.08.12-3)
+        // leaks the whole rest of the chart during a historical pass. Both are
+        // look-ahead; the second one is the nastier of the two because it only
+        // shows up in replay.
+        private bool ClosedStats(int evalBar, out decimal loQ, out decimal hiQ, out decimal volMedian)
         {
             loQ = hiQ = volMedian = 0m;
-            int last = CurrentBar - 1;
+            int last = evalBar - 1;
             if (last < 1) return false;
             int n = Math.Min(DeltaVolLookback, last + 1);
             if (n < 5) return false;
@@ -716,15 +791,18 @@ namespace AtasBridge
             return sorted[lo] + (sorted[hi] - sorted[lo]) * frac;
         }
 
-        // ===================== stage 1: realtime warning ===============
+        // ===================== stage 1: sweep detection ================
 
-        private void RealtimeStageOne(int bar)
+        // Runs for the bar currently being calculated - live that is the open
+        // bar on every tick, during a historical pass or a replay it walks
+        // forward one bar at a time. Same code, same inputs, hence same result.
+        private void StageOne(int bar)
         {
             var c = SafeCandle(bar);
             if (c == null) return;
             decimal atr = AtrM5();
             if (atr <= 0m) return;
-            if (!ClosedStats(out var loQ, out var hiQ, out var volMed)) return;
+            if (!ClosedStats(bar, out var loQ, out var hiQ, out var volMed)) return;
 
             bool volOk = volMed > 0m && c.Volume >= volMed * VolMultiple;
             if (!volOk) return;
@@ -981,8 +1059,12 @@ namespace AtasBridge
                                string evt, string message)
         {
             if (!enabled) return;
+            // Suppressed while walking history on load, see the note in
+            // OnCalculate. The dedup key is still consumed below so that a bar
+            // silenced here cannot ring later on a recalculation.
             string key = poolId + "|" + (isLong ? "L" : "S") + "|" + bar + "|" + evt;
             if (!_soundDedup.Add(key)) return;
+            if (!_soundsAllowed) return;
             try { AddAlert(file, message); }
             catch (Exception ex) { LogEx("AddAlert " + evt, ex); }
         }

@@ -1675,3 +1675,75 @@ scp 传输，**不要经 PowerShell 管道**。
 CS8602/CS0618 警告）。产物字符串校验：`[Description]`/`[Display]` 的中文以
 UTF-8 存在自定义特性 blob 中，代码内字符串常量以 UTF-16 存在 #US 堆中，
 两类分别按对应编码搜索全部命中、无乱码替换符。
+
+---
+
+## v2026.08.12-3（2026-08-12，SweepMarker：修零信号 bug + 中文字体）
+
+Sea 回放最近 3 天，**一个信号、一声提示都没有**。ATAS Platform 日志里
+`[SweepMarker]` 命中 **0 行**（也没有任何 `EX at`），面板显示
+`确认 0 / 作废 0`、`最近事件 暂无`。池线画得好好的 —— 这个组合直接指向病灶。
+
+### Bug A：阶段一在历史 K 线上从来没跑过（零信号的直接原因）
+
+原代码：
+
+```csharp
+while (_lastClosedProcessed < CurrentBar - 1)
+    ProcessClosedBar(++_lastClosedProcessed);
+if (bar == CurrentBar)
+    RealtimeStageOne(CurrentBar);
+```
+
+历史计算时 ATAS 以 `bar = 0..N` 逐根回调，而 `CurrentBar` 一开始就等于 N。
+于是 `bar == CurrentBar` **只在最后一次回调成立**，阶段一在整张图上只被
+评估了 1 根 K。池照常构建（所以池线看起来完全正常），但没有任何池进入
+WATCH，阶段二也就无从确认或作废 —— 表现就是"画得好看但永远不出信号"。
+
+### Bug B：`ClosedStats()` 用了未来数据（前视偏差）
+
+同一段里 `while` 的上界也是 `CurrentBar`，导致第一次回调就把所有 K 一次性
+收盘处理完；而 `ClosedStats()` 的取样上界同样写的 `CurrentBar - 1`，
+于是分位数/中位数是**在整张图（含被评估K之后的未来K）上算的**。
+
+这正是任务卡实现要求 3 明确警告的前视偏差。更麻烦的是它只在复盘时暴露：
+实盘 `CurrentBar` 就是当前 K，看不出问题。**上一版报告里"复盘与实盘一致"
+的结论因此是错的**，已在报告中更正。
+
+### 修法
+
+一切以**正在计算的那根 `bar`** 为基准，不再引用 `CurrentBar`：
+
+```csharp
+while (_lastClosedProcessed < bar - 1)
+    ProcessClosedBar(++_lastClosedProcessed);
+_soundsAllowed = _historyDone && bar >= CurrentBar;
+StageOne(bar);
+if (bar >= CurrentBar) _historyDone = true;
+```
+
+`ClosedStats(int evalBar, ...)` 增加参数，上界改为 `evalBar - 1`。
+这样实盘（每 tick 以 `bar == CurrentBar` 反复回调）与历史/复盘（`bar` 逐根
+前进）真正共用一条路径、同样的输入、同样的结果。
+
+### 声音门控（顺带修正的设计缺陷）
+
+Bug A 掩盖了另一个问题：修好之后，把指标加到 3 天历史图上会**一次性爆出
+一串早已过期的提示音**。新增 `_soundsAllowed = _historyDone && bar >= CurrentBar`：
+首次全量遍历期间静音，遍历完成后（实盘 tick 与 ATAS 回放逐根推进时）才响。
+去重键仍照常消费，避免某根被静音的 K 在后续重算时补响。
+
+### 中文字体（方框问题）
+
+Sea 反馈面板中文变方框。**既不是 ATAS 不支持中文，也不是系统缺字体** ——
+是字体写死成了 `Arial`，而 Arial 无 CJK 字形，`OFT.Rendering` 的
+`RenderFont` **不做字体回退**。`AtasBridge` / `AtasLiquidations` 也用 Arial，
+但它们只画 ASCII，所以这个坑一直没被踩到。ATAS 自己的设置窗口能正常显示
+中文，是因为那层 WPF UI 会回退，自定义绘制层不会。
+
+改为运行时探测而非写死：按
+`Microsoft YaHei UI → Microsoft YaHei → SimSun → SimHei → Malgun Gothic →
+Yu Gothic → Segoe UI → Arial` 顺序取第一个已安装的。这台机器是精简版
+Windows IoT LTSC 镜像，实测**只有 `Microsoft YaHei UI`，没有
+`Microsoft YaHei` / `SimSun` / `SimHei`**（全系统仅 153 个字体），
+所以写死任何一个具体中文字体名都可能在别的机器上再次变方框。
