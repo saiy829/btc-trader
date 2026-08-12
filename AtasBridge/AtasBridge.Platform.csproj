@@ -29,6 +29,10 @@
   <ItemGroup>
     <Compile Include="..\AtasBridge\AtasBridge.cs" />
     <Compile Include="..\AtasBridge\AtasLiquidations.cs" />
+    <!-- 2026-08-12（9G）新增。本项目 EnableDefaultCompileItems=false，所以每个
+         源文件都必须显式列出；漏掉这一行的后果是 Platform 版 dll 里没有
+         SweepMarker、而 ATAS X 版有，双平台静默不一致。 -->
+    <Compile Include="..\AtasBridge\SweepMarker.cs" />
   </ItemGroup>
 
   <ItemGroup>

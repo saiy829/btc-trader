@@ -7,6 +7,11 @@
     <Optimize>true</Optimize>
   </PropertyGroup>
 
+  <!-- 2026-08-12（9G）：本项目未关闭 EnableDefaultCompileItems，因此目录下的
+       .cs 由默认 glob 自动纳入编译，新增 SweepMarker.cs **不需要**在此显式列出。
+       ATAS Platform 那个 csproj 不一样：它设了 EnableDefaultCompileItems=false
+       并逐个列出源文件，新增文件必须同步加进它的 <Compile> 列表，否则会出现
+       "ATAS X 有 SweepMarker、Platform 没有" 的双平台不一致。 -->
   <ItemGroup>
     <Reference Include="ATAS.Indicators">
       <HintPath>D:\Program Files\ATAS X\ATAS.Indicators.dll</HintPath>

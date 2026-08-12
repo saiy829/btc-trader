@@ -1561,3 +1561,58 @@ Sea 的设置面板显示 `v2026.08.09-7`，而实际 dll 已经是 -31。原因
 （AtasBridge 与 AtasLiquidations 同在一个程序集），改动任一源文件都要更新它。
 `-33` 只改了 `AtasLiquidations.cs` 漏了这里，导致代码显示 `-32` 而 CHANGELOG
 记到 `-33`，已修正。
+
+---
+
+## v2026.08.12-1（2026-08-12，任务卡 9G：新增 SweepMarker 指标）
+
+新增第三个指标 `SweepMarker`（Setup C 流动性扫除反转标记），与 AtasBridge、
+AtasLiquidations 同在 AtasBridge.dll 里。纯标记指标：不推 VPS、不落库、不联网、
+不下单，只把入场/止损/TP1/TP2 画在图上供手动执行。
+
+**新增文件**：`AtasBridge/SweepMarker.cs`（纯 ASCII，注释全英文，符合 v5.1 起的约定）
+
+**两阶段检测**（本卡的核心设计）：扫除稍纵即逝，等 M5 收盘再提示最佳入场已跑掉，
+故拆成两级时间精度：
+
+- 阶段一（tick 级，不等收盘）：价格越过池 > MinPenetration×ATR(M5)、当前 bar
+  累计 Delta 落在近 50 根**已收盘** bar 的 5%/95% 分位尾部、累计成交量 ≥ 中位数
+  ×VolMultiple → 播预警音 + 画小三角 + 面板提示 + 池进入 WATCH
+- 阶段二（M5 收盘判定）：收回池内 + ADR ≤ AdrPass + 收回过程出现吸收 → 确认并
+  画完整信号；超时未收回 / 穿透过深 / ADR 过高 / 二次破位 → 作废
+
+**强制去重**：`(poolId, direction, barIndex)` 作阶段去重键，声音再叠加 eventType。
+不做这条的话 tick 级检测会疯狂响，指标直接不可用。
+
+**无前视偏差**：分位数与中位数只取 `CurrentBar-1` 及更早的已收盘 bar。所有 bar
+收盘处理走同一条 `while (_lastClosedProcessed < CurrentBar - 1)` 路径，历史回放
+与实盘因此得到一致结果。
+
+**三处实测确认（不凭记忆写）**：
+
+- `AddAlert` 真实签名反射确认为 `ExtendedIndicator.AddAlert(string soundFile,
+  string message)`（另两个重载带 `Color`，双平台类型不同，故用两参数版规避）
+- 音效文件取 ATAS 自带的 `alert1.wav` / `alert3.wav` / `beep_2_1.wav`，两平台
+  `<install>\Sounds\` 下均存在
+- 绘图坐标用 `ChartInfo.PriceChartContainer.GetXByBar(bar,false)` /
+  `GetYByPrice(price,false)`（反射确认签名），绘制层用 `DrawingLayouts.Final`
+  —— 沿用 -28 的教训，订阅 Historical 会顶掉历史层绘制
+
+**ATR 来源**：ATR(M5) 由本指标自算真实波幅均值（周期常量 14）；ATR(D1) 从 M5 流
+按图表时区聚合成日桶后再算，避免为了一条日线 ATR 去引入第二数据序列。两个周期
+是内部常量而非设置项 —— 任务卡的参数清单里没有它们，不擅自加。
+
+**双平台**：`AtasBridge.Platform.csproj` 已加 `<Compile Include="..\AtasBridge\
+SweepMarker.cs" />`（该项目 `EnableDefaultCompileItems=false`，漏加会导致
+Platform 版 dll 里没有 SweepMarker 而 ATAS X 版有）。`AtasBridge.csproj` 走默认
+glob 自动纳入，只补了一段说明注释。
+
+**编译验证**：双平台各 0 错误。用 MetadataReader 校验产物：两个 dll 都含
+`AtasBridge / AtasLiquidations / SweepMarker` 三个类型；ATAS X 版不引用
+PresentationCore（`SeriesColor` = `System.Drawing.Color`），Platform 版引用
+（`SeriesColor` = `System.Windows.Media.Color`），证明 `#if ATAS_PLATFORM`
+分支双向都真的走到了。
+
+**未完成**：ATAS 内的运行时验证（加载、池线绘制、3 天回放、声音、M15 周期警告）
+尚未执行 —— 需要覆盖指标目录并重启 ATAS，而 Sea 的 ATAS 正在使用中，未获授权
+不动。部署命令与待验证清单见 `reports/SWEEP_9G_20260812.md`。
