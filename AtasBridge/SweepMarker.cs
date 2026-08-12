@@ -126,11 +126,20 @@ namespace AtasBridge
         // and these are not on it. 14 is the conventional Wilder length.
         private const int ATR_M5_PERIOD = 14;
         private const int ATR_D1_PERIOD = 14;
-        // Built-in ATAS sound files, present in <install>\Sounds on both
-        // platforms. AddAlert takes the bare file name.
-        private const string SND_ALERT   = "alert1.wav";
-        private const string SND_CONFIRM = "alert3.wav";
-        private const string SND_INVALID = "beep_2_1.wav";
+        // Sound file names, WITHOUT the .wav extension.
+        //
+        // v2026.08.12-3 passed "alert1.wav" and nothing ever played, with no
+        // exception thrown. ATAS's own alert-file pickers list the contents of
+        // <install>\Sounds with the extension stripped ("xishouAbs", "geiger",
+        // "tap"), which means the platform appends ".wav" itself - so passing
+        // "alert1.wav" made it look for "alert1.wav.wav" and fail silently.
+        // These three are the defaults; the actual values are settings so the
+        // user can point them at their own sounds (this install has custom ones
+        // like xishou / gengdan / qifei / zapan in the Platform Sounds folder).
+        // alert1 / alert3 / beep_2_1 exist in BOTH ATAS and ATAS X.
+        private const string SND_ALERT   = "alert1";
+        private const string SND_CONFIRM = "alert3";
+        private const string SND_INVALID = "beep_2_1";
         // Retrigger window for the timeout case, see Pool.RetriggerCount.
         private const int RETRIGGER_WINDOW_MIN = 30;
         // Hard cap on how many pools we keep, so a pathological chart cannot
@@ -282,6 +291,23 @@ namespace AtasBridge
                  Description = "卖方流动性池（摆动低点）的线条颜色")]
         public SeriesColor SslColor { get; set; } = MakeColor(255, 8, 153, 129);
 
+        // Must be a font that actually contains CJK glyphs, see DEFAULT_FONT.
+        [Display(Name = "面板字体", GroupName = "5 显示", Order = 6,
+                 Description = "画在图上的文字用的字体。必须是含中文字形的字体，否则中文显示为方框（ATAS 绘制层不做字体回退）。本机可用：Microsoft YaHei UI。若换机器后变方框，改成该机装有的中文字体名")]
+        public string PanelFont
+        {
+            get => _fontFamily;
+            set
+            {
+                var v = (value ?? "").Trim();
+                if (v.Length == 0) return;
+                _fontFamily = v;
+                _font = new RenderFont(v, 11f);
+                _fontSmall = new RenderFont(v, 10f);
+                RedrawChart();
+            }
+        }
+
         // ================= settings: sound ============================
 
         [Display(Name = "预警音(扫除进行中)", GroupName = "6 声音", Order = 1,
@@ -295,6 +321,19 @@ namespace AtasBridge
         [Display(Name = "作废音(别等了)", GroupName = "6 声音", Order = 3,
                  Description = "该次扫除已作废。默认关闭，避免震荡行情里噪音过多")]
         public bool EnableSoundInvalid { get; set; } = false;
+
+        // File name only, no .wav - see the SND_* constants for why.
+        [Display(Name = "预警音文件", GroupName = "6 声音", Order = 4,
+                 Description = "音效文件名，不要带 .wav 后缀。文件放在 ATAS 安装目录的 Sounds 文件夹里。可填自定义音效名，例如 xishou / gengdan / qifei")]
+        public string SoundFileAlert { get; set; } = SND_ALERT;
+
+        [Display(Name = "确认音文件", GroupName = "6 声音", Order = 5,
+                 Description = "音效文件名，不带 .wav。建议选一个与预警音明显不同的，确认音是真正该动手的时刻")]
+        public string SoundFileConfirm { get; set; } = SND_CONFIRM;
+
+        [Display(Name = "作废音文件", GroupName = "6 声音", Order = 6,
+                 Description = "音效文件名，不带 .wav。建议用低沉或短促的音效")]
+        public string SoundFileInvalid { get; set; } = SND_INVALID;
 
         // ===================== internal state =========================
 
@@ -373,47 +412,31 @@ namespace AtasBridge
         private DateTime _todayDate = DateTime.MinValue;
         private bool _periodOk = true;
         private string _periodText = "";
-        private bool _historyDone;      // first full pass over history finished
         private bool _soundsAllowed;    // set per OnCalculate, see the bugfix note
+        private int _soundLogCount;     // caps the sound diagnostic lines
 
         // OFT.Rendering's RenderFont does NO font fallback: a family without CJK
         // glyphs draws Chinese as tofu boxes. Arial (what AtasBridge and
         // AtasLiquidations use) has no CJK coverage - they only ever drew ASCII,
-        // so nobody noticed until this indicator's panel went Chinese.
-        // ATAS's own settings dialog renders Chinese fine because that WPF layer
-        // does fall back; the custom drawing layer does not.
-        // Probing rather than hardcoding because this box is a trimmed Windows
-        // IoT LTSC image: it has "Microsoft YaHei UI" but NOT "Microsoft YaHei",
-        // "SimSun" or "SimHei" (153 fonts installed in total).
-#pragma warning disable CA1416
-        private static readonly string UiFontFamily = ResolveFontFamily();
-
-        private static string ResolveFontFamily()
-        {
-            string[] prefs =
-            {
-                "Microsoft YaHei UI", "Microsoft YaHei", "SimSun", "SimHei",
-                "Malgun Gothic", "Yu Gothic", "Segoe UI", "Arial"
-            };
-            try
-            {
-                using var col = new System.Drawing.Text.InstalledFontCollection();
-                var have = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach (var f in col.Families) have.Add(f.Name);
-                foreach (var p in prefs)
-                    if (have.Contains(p)) return p;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("[SweepMarker] font probe failed "
-                                  + ex.GetType().Name + ": " + ex.Message);
-            }
-            return "Arial";
-        }
-#pragma warning restore CA1416
-
-        private static readonly RenderFont _font = new(UiFontFamily, 11f);
-        private static readonly RenderFont _fontSmall = new(UiFontFamily, 10f);
+        // so nobody noticed until this indicator's panel went Chinese. ATAS's
+        // own settings dialog renders Chinese fine because that WPF layer does
+        // fall back; the custom drawing layer does not.
+        //
+        // The family is a SETTING rather than a probe. The obvious probe,
+        // System.Drawing.Text.InstalledFontCollection, compiles on ATAS X but
+        // breaks the ATAS Platform build with
+        //   CS0012: IPointer<> is defined in an unreferenced assembly
+        //           System.Private.Windows.Core
+        // because Platform references the WindowsDesktop copy of
+        // System.Drawing.Common, which drags in that internal assembly.
+        // Exposing it as a setting avoids the API entirely and lets the user fix
+        // it themselves on a machine with different fonts - which matters: this
+        // box is a trimmed Windows IoT LTSC image with only 153 fonts, it has
+        // "Microsoft YaHei UI" but NOT "Microsoft YaHei" / "SimSun" / "SimHei".
+        private const string DEFAULT_FONT = "Microsoft YaHei UI";
+        private string _fontFamily = DEFAULT_FONT;
+        private RenderFont _font = new(DEFAULT_FONT, 11f);
+        private RenderFont _fontSmall = new(DEFAULT_FONT, 10f);
 
         public SweepMarker() : base(true)
         {
@@ -474,8 +497,8 @@ namespace AtasBridge
             _todayConfirmed = _todayInvalidated = 0;
             _todayDate = DateTime.MinValue;
             _logCount = 0;
-            _historyDone = false;
             _soundsAllowed = false;
+            _soundLogCount = 0;
         }
 
         // ===================== main entry point ========================
@@ -518,17 +541,21 @@ namespace AtasBridge
                 while (_lastClosedProcessed < bar - 1)
                     ProcessClosedBar(++_lastClosedProcessed);
 
-                // Sounds must not fire while the indicator is grinding through
-                // history on load, otherwise adding it to a 3 day chart plays a
-                // burst of alerts for events that are long gone. They are
-                // enabled once the first full pass is done, which is also what
-                // makes ATAS bar-replay audible: replay appends bars, so each
-                // new bar arrives with bar == CurrentBar after history is done.
-                _soundsAllowed = _historyDone && bar >= CurrentBar;
+                // Sounds only for the bar at the right edge. During a historical
+                // pass bar walks 0..N and this is true only on the final call,
+                // so loading the indicator on a 3 day chart cannot machine-gun
+                // alerts for events that are long gone - at most the newest bar
+                // rings. In live and in ATAS market replay the right edge is
+                // exactly where new events appear, so those do ring.
+                //
+                // v2026.08.12-3 additionally required a completed first pass
+                // (_historyDone). That was removed in -4: if ATAS recalculates
+                // the whole series for each replay step, bar == 0 resets the
+                // flag every time and every event stays silent forever, which
+                // is what Sea observed - 80 logged events, not one sound.
+                _soundsAllowed = bar >= CurrentBar;
 
                 StageOne(bar);
-
-                if (bar >= CurrentBar) _historyDone = true;
             }
             catch (Exception ex)
             {
@@ -843,7 +870,7 @@ namespace AtasBridge
                 _lastEvent = "预警 " + (isLong ? "SSL " : "BSL ") + Fmt(p.Price) +
                              (isLong ? "（多头 setup 形成中）" : "（空头 setup 形成中）");
                 Log(_lastEvent + " bar=" + bar + " delta=" + Fmt(c.Delta) + " vol=" + Fmt(c.Volume));
-                PlaySound(SND_ALERT, EnableSoundAlert, p.Id, isLong, bar, "alert",
+                PlaySound(SoundFileAlert, EnableSoundAlert, p.Id, isLong, bar, "alert",
                           "SweepMarker: " + _lastEvent);
             }
         }
@@ -961,7 +988,7 @@ namespace AtasBridge
             _todayInvalidated++;
             _lastEvent = "作废 " + ReasonText(reason) + " 池=" + Fmt(p.Price) + " ADR=" + adr.ToString("0.00");
             Log(_lastEvent + " bar=" + bar + " retrigger=" + p.RetriggerCount);
-            PlaySound(SND_INVALID, EnableSoundInvalid, p.Id, isLong, bar, "invalid",
+            PlaySound(SoundFileInvalid, EnableSoundInvalid, p.Id, isLong, bar, "invalid",
                       "SweepMarker: " + _lastEvent);
         }
 
@@ -1017,7 +1044,7 @@ namespace AtasBridge
                          (sig.Weak ? " 弱信号" : "") + (sig.RrLow ? " 盈亏比不足" : "");
             Log(_lastEvent + " bar=" + bar + " stop=" + Fmt(stop) + " tp2=" + Fmt(tp2) +
                 " size=" + size.ToString("0.000"));
-            PlaySound(SND_CONFIRM, EnableSoundConfirm, p.Id, isLong, bar, "confirm",
+            PlaySound(SoundFileConfirm, EnableSoundConfirm, p.Id, isLong, bar, "confirm",
                       "SweepMarker: " + _lastEvent);
         }
 
@@ -1059,13 +1086,34 @@ namespace AtasBridge
                                string evt, string message)
         {
             if (!enabled) return;
-            // Suppressed while walking history on load, see the note in
-            // OnCalculate. The dedup key is still consumed below so that a bar
-            // silenced here cannot ring later on a recalculation.
+            if (string.IsNullOrWhiteSpace(file)) return;
+            // Dedup first so a bar silenced by the right-edge gate below cannot
+            // ring later on a recalculation of the same bar.
             string key = poolId + "|" + (isLong ? "L" : "S") + "|" + bar + "|" + evt;
             if (!_soundDedup.Add(key)) return;
-            if (!_soundsAllowed) return;
-            try { AddAlert(file, message); }
+            if (!_soundsAllowed)
+            {
+                if (_soundLogCount < 6)
+                {
+                    _soundLogCount++;
+                    Log("sound suppressed (not right edge) evt=" + evt + " bar=" + bar
+                        + " CurrentBar=" + CurrentBar);
+                }
+                return;
+            }
+            // Diagnostic for the first few dispatches: if a sound still does not
+            // play, this line tells us whether we even got here, which file name
+            // was used, and whether the platform has alerts switched on at all.
+            if (_soundLogCount < 6)
+            {
+                _soundLogCount++;
+                bool ae;
+                try { ae = AlertsEnabled; }
+                catch (Exception ex) { LogEx("read AlertsEnabled", ex); ae = false; }
+                Log("sound dispatch evt=" + evt + " file=" + file
+                    + " bar=" + bar + " AlertsEnabled=" + ae);
+            }
+            try { AddAlert(file.Trim(), message); }
             catch (Exception ex) { LogEx("AddAlert " + evt, ex); }
         }
 

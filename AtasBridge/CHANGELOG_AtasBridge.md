@@ -1741,9 +1741,73 @@ Sea 反馈面板中文变方框。**既不是 ATAS 不支持中文，也不是�
 但它们只画 ASCII，所以这个坑一直没被踩到。ATAS 自己的设置窗口能正常显示
 中文，是因为那层 WPF UI 会回退，自定义绘制层不会。
 
-改为运行时探测而非写死：按
-`Microsoft YaHei UI → Microsoft YaHei → SimSun → SimHei → Malgun Gothic →
-Yu Gothic → Segoe UI → Arial` 顺序取第一个已安装的。这台机器是精简版
-Windows IoT LTSC 镜像，实测**只有 `Microsoft YaHei UI`，没有
-`Microsoft YaHei` / `SimSun` / `SimHei`**（全系统仅 153 个字体），
-所以写死任何一个具体中文字体名都可能在别的机器上再次变方框。
+本想做运行时探测，但 `System.Drawing.Text.InstalledFontCollection` 在 ATAS X
+能编过、在 ATAS Platform 直接
+`CS0012: IPointer<> 在未引用的程序集 System.Private.Windows.Core 中定义`
+—— Platform 引用的是 WindowsDesktop 那份 `System.Drawing.Common`，会牵出该
+内部程序集。**改为开放成设置项「面板字体」**，默认 `Microsoft YaHei UI`。
+这台机器是精简版 Windows IoT LTSC 镜像，实测**只有 `Microsoft YaHei UI`，
+没有 `Microsoft YaHei` / `SimSun` / `SimHei`**（全系统仅 153 个字体），
+所以写死任何一个具体中文字体名都可能在别的机器上再次变方框，开成设置项
+让用户自己改最稳。
+
+---
+
+## v2026.08.12-4（2026-08-12，SweepMarker：声音终于响 + 音效可配置）
+
+-3 修好了零信号，Sea 复盘拿到 **80 条事件、0 异常**，面板中文正常、
+黄三角/四条线/灰X 都画出来了 —— 但**仍然一声都没响**。
+
+### 根因：`AddAlert` 的文件名不能带 `.wav`
+
+-3 传的是 `"alert1.wav"`，既不抛异常也不出声。线索来自 Sea 截图里另一个
+指标（5F 的 Absorption）的「警报文件」下拉框：里面列的全是**不带后缀**的
+名字（`xishouAbs` / `geiger` / `tap` / `Windows Ding`）。也就是说该下拉框
+是枚举 `<install>\Sounds\*.wav` 后**去掉扩展名**填充的，平台自己会补
+`.wav`。传 `"alert1.wav"` 等于让它去找 `alert1.wav.wav`，找不到就静默失败。
+
+改为传裸文件名 `alert1` / `alert3` / `beep_2_1`（两个平台的 Sounds 目录里
+都有），并**开放成三个设置项**「预警音文件 / 确认音文件 / 作废音文件」，
+方便 Sea 换成自己的音效 —— 该机 Platform 的 Sounds 目录里有一批自定义音效
+（`xishou` `xishouAbs` `gengdan` `laisheng` `maidan` `qifei` `qingcang`
+`shiheng` `zapan` `chaojidadan` `chaojimaidan` `daemaidan` `daeqingsuan`
+`Delta yichang` `TPOjujue`）。
+
+### 顺带去掉 `_historyDone` 门控
+
+-3 的门控是 `_historyDone && bar >= CurrentBar`。若 ATAS 在市场回放时对每
+一步都重算整个序列，`bar == 0` 会把 `_historyDone` 重置，于是**永远静音**
+—— 这也可能是零声音的第二个原因（与文件名问题叠加）。改为只判右边缘
+`bar >= CurrentBar`：历史遍历时该条件仅在最后一次回调成立，所以加载 3 天
+历史最多响最新那一根，不会机枪式补响；实盘与回放的新事件都在右边缘，照响。
+
+### 新增声音诊断日志
+
+`PlaySound` 现在会记录前 6 次的去向：派发时写
+`sound dispatch evt=... file=... bar=... AlertsEnabled=...`，被右边缘门控
+拦下时写 `sound suppressed (not right edge) ...`。若还是不响，这行日志能
+直接区分"没走到派发"与"派发了但平台没出声"，不必再猜。
+
+### -3 复盘实测数据（任务卡验证 5）
+
+ATAS Platform 日志 `app_20260812.log`，`[SweepMarker]` 命中 80 行、
+**0 个异常**：
+
+| 事件 | 数量 |
+|---|---|
+| 预警（阶段一） | 41 |
+| 确认 | 7（做多 5 / 做空 2） |
+| 作废 | 31 |
+| 不画信号（止损过近） | 1 |
+
+作废原因分布：**穿透过深 29**、超时未收回 1、ADR过高 1、止损过近 1、
+二次破位 0。
+
+7 个确认里 3 个标「盈亏比不足」（1.8 / 2.0 / 1.5），4 个达标
+（2.3 / 2.7 / 2.7 / 2.4）。ADR 全部落在 0.13~0.48，即都在
+`AdrPass=0.8` 以内，没有触发"弱信号"档。
+
+**结论：29/31 的作废都是"穿透过深"，这就是 Sea 看到"满屏灰色"的原因。**
+病灶不是阈值 `MaxPenetration=1.5` 太小，而是 `MinPenetration=0.05` 太浅
+—— 0.05×ATR(M5) 在 BTC 上只有几美元，价格稍微一探头就进 WATCH，而这类
+浅探头大多是真突破的起点，随后自然穿透过深。调参方向见报告。
