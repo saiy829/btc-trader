@@ -335,6 +335,12 @@ namespace AtasBridge
                  Description = "音效文件名，不带 .wav。建议用低沉或短促的音效")]
         public string SoundFileInvalid { get; set; } = SND_INVALID;
 
+        // Needed because ATAS market replay keeps CurrentBar at the end of the
+        // whole loaded series, so the right-edge gate can never open there.
+        [Display(Name = "历史与回放也播声音", GroupName = "6 声音", Order = 7,
+                 Description = "默认关闭：加载历史时不会把过去的事件全部补响。做复盘验证时打开它，回放中的每个事件都会出声（可能连续响，属正常）")]
+        public bool SoundOnHistory { get; set; } = false;
+
         // ===================== internal state =========================
 
         private enum PoolKind { Bsl, Ssl }
@@ -412,8 +418,12 @@ namespace AtasBridge
         private DateTime _todayDate = DateTime.MinValue;
         private bool _periodOk = true;
         private string _periodText = "";
-        private bool _soundsAllowed;    // set per OnCalculate, see the bugfix note
+        private bool _soundsAllowed;    // set per OnCalculate, see the gating note
         private int _soundLogCount;     // caps the sound diagnostic lines
+        // These two must NOT be cleared by ResetAll(), see the gating note.
+        private int _maxBarProcessed = -1;
+        private bool _firstPassDone;
+        private int _totalConfirmed, _totalInvalidated;   // whole series, no day reset
 
         // OFT.Rendering's RenderFont does NO font fallback: a family without CJK
         // glyphs draws Chinese as tofu boxes. Arial (what AtasBridge and
@@ -499,6 +509,8 @@ namespace AtasBridge
             _logCount = 0;
             _soundsAllowed = false;
             _soundLogCount = 0;
+            _totalConfirmed = _totalInvalidated = 0;
+            // _maxBarProcessed / _firstPassDone are intentionally preserved.
         }
 
         // ===================== main entry point ========================
@@ -541,21 +553,39 @@ namespace AtasBridge
                 while (_lastClosedProcessed < bar - 1)
                     ProcessClosedBar(++_lastClosedProcessed);
 
-                // Sounds only for the bar at the right edge. During a historical
-                // pass bar walks 0..N and this is true only on the final call,
-                // so loading the indicator on a 3 day chart cannot machine-gun
-                // alerts for events that are long gone - at most the newest bar
-                // rings. In live and in ATAS market replay the right edge is
-                // exactly where new events appear, so those do ring.
+                // SOUND GATING - third attempt, this time driven by measurement.
                 //
-                // v2026.08.12-3 additionally required a completed first pass
-                // (_historyDone). That was removed in -4: if ATAS recalculates
-                // the whole series for each replay step, bar == 0 resets the
-                // flag every time and every event stays silent forever, which
-                // is what Sea observed - 80 logged events, not one sound.
-                _soundsAllowed = bar >= CurrentBar;
+                // -3 used (_historyDone && bar >= CurrentBar), -4 used
+                // (bar >= CurrentBar). Both are silent in ATAS market replay,
+                // and the diagnostic log from -4 shows exactly why:
+                //   sound suppressed (not right edge) evt=alert bar=54 CurrentBar=8539
+                // During replay ATAS keeps CurrentBar at the END OF THE WHOLE
+                // LOADED SERIES (8539 M5 bars, about 30 days) and re-walks the
+                // series for each replay step, so "bar >= CurrentBar" is never
+                // true where the events are. 18 suppressed lines = 3 full
+                // recalculations x the 6-line diagnostic cap.
+                //
+                // So the gate can no longer lean on CurrentBar. It now tracks
+                // the highest bar this instance has ever calculated:
+                //   - initial pass: every bar is new, but _firstPassDone is
+                //     still false, so it stays silent (no machine-gunning the
+                //     30 days of history that just loaded)
+                //   - later re-walks of the same series: bar < _maxBarProcessed
+                //     for everything except the last bar, so silent
+                //   - a genuinely new bar (live, or a replay step appending
+                //     one): bar >= _maxBarProcessed, so it rings
+                // _maxBarProcessed and _firstPassDone deliberately survive
+                // ResetAll(): a recalculation must not re-arm the history burst.
+                //
+                // SoundOnHistory bypasses all of it, which is what makes replay
+                // validation possible at all.
+                _soundsAllowed = SoundOnHistory
+                                 || (_firstPassDone && bar >= _maxBarProcessed);
+                if (bar > _maxBarProcessed) _maxBarProcessed = bar;
 
                 StageOne(bar);
+
+                if (bar >= CurrentBar) _firstPassDone = true;
             }
             catch (Exception ex)
             {
@@ -986,6 +1016,7 @@ namespace AtasBridge
                 Price = p.SweepExtremePrice, Reason = reason
             });
             _todayInvalidated++;
+            _totalInvalidated++;
             _lastEvent = "作废 " + ReasonText(reason) + " 池=" + Fmt(p.Price) + " ADR=" + adr.ToString("0.00");
             Log(_lastEvent + " bar=" + bar + " retrigger=" + p.RetriggerCount);
             PlaySound(SoundFileInvalid, EnableSoundInvalid, p.Id, isLong, bar, "invalid",
@@ -1021,7 +1052,15 @@ namespace AtasBridge
             }
 
             decimal tp1 = isLong ? entry + 1.5m * r : entry - 1.5m * r;
-            decimal tp2 = NearestOppositePool(entry, isLong);
+            // "上方最近的摆动高点" is read as "the nearest one that is actually
+            // USABLE as a target", i.e. far enough to clear MinRR. Taking the
+            // literally nearest pool made most signals grey: 2026-08-12 Sea
+            // tightened EqualTolerance, which produced more and denser pools, so
+            // the nearest one sat very close to entry and RR collapsed (the same
+            // 63801 long went from RR 2.9 to 1.7). Falling back to 3R when no
+            // pool qualifies is what the card already specifies for "no usable
+            // BSL".
+            decimal tp2 = NearestUsableOppositePool(entry, isLong, r);
             if (tp2 <= 0m) tp2 = isLong ? entry + 3.0m * r : entry - 3.0m * r;
 
             decimal rr = Math.Abs(tp2 - entry) / r;
@@ -1038,6 +1077,7 @@ namespace AtasBridge
             };
             _signals.Add(sig);
             _todayConfirmed++;
+            _totalConfirmed++;
 
             _lastEvent = (isLong ? "确认 做多 " : "确认 做空 ") + Fmt(entry) +
                          " 盈亏比=" + rr.ToString("0.0") + " ADR=" + adr.ToString("0.00") +
@@ -1056,24 +1096,32 @@ namespace AtasBridge
                 Price = p.SweepExtremePrice, Reason = reason
             });
             _todayInvalidated++;
+            _totalInvalidated++;
             _lastEvent = "不画信号 " + ReasonText(reason) + " 止损距离=" + stopPct.ToString("0.00") + "%";
             Log(_lastEvent + " bar=" + bar);
         }
 
-        private decimal NearestOppositePool(decimal entry, bool isLong)
+        // Nearest opposite-side pool that is at least MinRR away, so it is worth
+        // using as TP2. Returns 0 when none qualifies; the caller then falls back
+        // to 3R.
+        private decimal NearestUsableOppositePool(decimal entry, bool isLong, decimal r)
         {
+            if (r <= 0m) return 0m;
+            decimal need = MinRR * r;
             decimal best = 0m;
             foreach (var p in _pools)
             {
                 if (p.State != PoolState.Active) continue;
                 if (isLong)
                 {
-                    if (p.Kind != PoolKind.Bsl || p.Price <= entry) continue;
+                    if (p.Kind != PoolKind.Bsl) continue;
+                    if (p.Price - entry < need) continue;
                     if (best == 0m || p.Price < best) best = p.Price;
                 }
                 else
                 {
-                    if (p.Kind != PoolKind.Ssl || p.Price >= entry) continue;
+                    if (p.Kind != PoolKind.Ssl) continue;
+                    if (entry - p.Price < need) continue;
                     if (best == 0m || p.Price > best) best = p.Price;
                 }
             }
@@ -1292,29 +1340,52 @@ namespace AtasBridge
                           + "  请切回 5 分钟图");
             lines.Add("监控中的池：BSL " + bsl + " 条 / SSL " + ssl + " 条");
             lines.Add("最近事件：" + _lastEvent);
-            lines.Add("今日：确认 " + _todayConfirmed + " 个 / 作废 " + _todayInvalidated + " 个");
-
-            // Coordinates are absolute canvas coordinates, not panel relative,
-            // and ClipBounds starts at (0,0) - AtasLiquidations hit that trap.
-            // Anchor on the container region when it is available.
-            int baseX = 5, baseY = 20;
-            try
-            {
-                var region = Container?.RelativeRegion ?? default;
-                if (region.Height > 0) { baseX = region.X + 5; baseY = region.Y + 20; }
-            }
-            catch (Exception ex) { LogEx("panel anchor", ex); }
+            // "今日" counters reset at every day boundary while walking the
+            // series, so on a 30 day chart they show the LAST day only - which
+            // read as a bug ("最近事件" showed a confirm while 今日 said 0).
+            // The whole-series totals are what you actually want when reviewing.
+            lines.Add("今日：确认 " + _todayConfirmed + " 个 / 作废 " + _todayInvalidated
+                      + " 个　　全图累计：确认 " + _totalConfirmed + " 个 / 作废 " + _totalInvalidated + " 个");
 
             int w = 0;
             foreach (var l in lines) w = Math.Max(w, ctx.MeasureString(l, _font).Width);
             int lh = ctx.MeasureString("Ag", _font).Height + 2;
-            ctx.FillRectangle(Color.FromArgb(190, 0, 0, 0),
-                new Rectangle(baseX - 4, baseY - 3, w + 12, lh * lines.Count + 6));
+            int boxW = w + 12;
+            int boxH = lh * lines.Count + 6;
 
+            // Top CENTER, not top left (2026-08-12, Sea: the left corner box was
+            // covering price action). Coordinates are absolute canvas
+            // coordinates, not panel relative, and ClipBounds starts at (0,0) -
+            // AtasLiquidations hit that trap - so anchor on the container region
+            // when it is available and centre horizontally inside it.
+            int regionX = 0, regionY = 0, regionW = 0;
+            try
+            {
+                var region = Container?.RelativeRegion ?? default;
+                if (region.Height > 0)
+                {
+                    regionX = region.X; regionY = region.Y; regionW = region.Width;
+                }
+            }
+            catch (Exception ex) { LogEx("panel anchor", ex); }
+            if (regionW <= 0)
+            {
+                var clip = ctx.ClipBounds;
+                regionX = clip.X; regionY = clip.Y; regionW = clip.Width;
+                if (regionW <= 0) { regionX = 0; regionY = 0; regionW = ctx.Size.Width; }
+            }
+
+            int boxX = regionX + Math.Max(0, (regionW - boxW) / 2);
+            int boxY = regionY + 4;
+
+            ctx.FillRectangle(Color.FromArgb(190, 0, 0, 0), new Rectangle(boxX, boxY, boxW, boxH));
             for (int i = 0; i < lines.Count; i++)
             {
                 var col = (!_periodOk && i == 0) ? Color.OrangeRed : Color.Gainsboro;
-                ctx.DrawString(lines[i], _font, col, baseX, baseY + i * lh);
+                int tw = ctx.MeasureString(lines[i], _font).Width;
+                // centre each line inside the box so it reads as one block
+                ctx.DrawString(lines[i], _font, col,
+                               boxX + Math.Max(6, (boxW - tw) / 2), boxY + 3 + i * lh);
             }
         }
 
