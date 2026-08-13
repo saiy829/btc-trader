@@ -341,6 +341,30 @@ namespace AtasBridge
 
         // ================= settings: sound ============================
 
+        // ================= settings: higher timeframe filter ===========
+        // Task card 9H. The 9G conclusion ("not tradeable") only exhausted the
+        // COST side; this is the first attempt at the GROSS EDGE side. See
+        // CARD_9H.md for the reasoning and the pass/fail criteria.
+
+        [Display(Name = "高周期(分钟)", GroupName = "7 高周期过滤", Order = 1,
+                 Description = "用于判定大方向的周期，60=H1，240=H4。图表K线会按此长度聚合成高周期K线，再在其上判定市场结构")]
+        public int HtfMinutes { get; set; } = 60;
+
+        [Display(Name = "高周期摆动点左右K数", GroupName = "7 高周期过滤", Order = 2,
+                 Description = "在高周期K上判定摆动点时左右各需多少根。调大=结构更粗更稳，调小=更灵敏但易翻转")]
+        public int HtfPivotBars { get; set; } = 3;
+
+        // int rather than an enum: ATAS shows enum member names verbatim and
+        // Chinese identifiers in code would break the "code in English"
+        // convention, so the meaning lives in the description instead.
+        [Display(Name = "方向过滤模式(0关闭/1只顺势/2只逆势)", GroupName = "7 高周期过滤", Order = 3,
+                 Description = "0=关闭，全部画出并提示；1=只保留顺势信号；2=只保留逆势信号（对照组，用来验证方向到底有没有用）。⚠ 无论设成几，统计里三组都照常分开计数，所以设 0 加载一次就能同时看到三组表现")]
+        public int TrendFilterMode { get; set; } = 0;
+
+        [Display(Name = "中性时放行", GroupName = "7 高周期过滤", Order = 4,
+                 Description = "高周期结构不明确（既非HH+HL也非LH+LL）时是否放行。关掉则只在结构明确时才出信号")]
+        public bool AllowNeutral { get; set; } = true;
+
         [Display(Name = "预警音(扫除进行中)", GroupName = "6 声音", Order = 1,
                  Description = "阶段一：扫除正在发生。听到后做准备，不要立刻进场")]
         public bool EnableSoundAlert { get; set; } = true;
@@ -408,6 +432,20 @@ namespace AtasBridge
         // Stop  = stop hit -> loss
         private enum Outcome { Open, Tp1, Tp2, Stop }
 
+        // Higher timeframe market structure, 9H.
+        private enum Bias { Bull, Bear, Neutral }
+        // Where the signal sits relative to that structure.
+        private enum Align { With, Against, Neutral }
+
+        // One aggregated higher timeframe candle. Built incrementally from the
+        // chart's own bars, exactly like UpdateDailyAtr() builds daily buckets -
+        // no second data series, no extra API surface.
+        private sealed class HtfBar
+        {
+            public DateTime Time;
+            public decimal High, Low, Close;
+        }
+
         private sealed class Signal
         {
             public int Bar;
@@ -426,6 +464,11 @@ namespace AtasBridge
             // is wrong, not the entry.
             public decimal MaxFavR;
             public decimal MaxAdvR;
+            // 9H: higher timeframe alignment at the moment the signal fired.
+            // Recorded for EVERY signal regardless of the filter setting, which
+            // is what lets one chart load answer "does direction matter".
+            public Align Align = Align.Neutral;
+            public bool Filtered;   // suppressed by the filter: not drawn, no sound
         }
 
         private sealed class InvalidMark
@@ -453,6 +496,15 @@ namespace AtasBridge
 
         private readonly List<decimal> _trM5 = new();          // true range per closed bar
         private readonly List<decimal> _dayTr = new();          // true range per closed day
+
+        // ---- 9H higher timeframe structure ----
+        private readonly List<HtfBar> _htf = new();     // CLOSED htf candles only
+        private HtfBar? _htfCur;                        // the one still forming
+        private long _htfBucket = long.MinValue;
+        private readonly List<decimal> _htfSwingHigh = new();   // chronological
+        private readonly List<decimal> _htfSwingLow = new();
+        private int _htfPivotScanned = -1;
+        private Bias _htfBias = Bias.Neutral;
         private DateTime _curDay = DateTime.MinValue;
         private decimal _dayHigh, _dayLow, _prevDayClose, _curDayClose;
 
@@ -546,6 +598,9 @@ namespace AtasBridge
             _pools.Clear(); _signals.Clear(); _invalids.Clear(); _alertMarks.Clear();
             _dedup.Clear(); _soundDedup.Clear();
             _trM5.Clear(); _dayTr.Clear();
+            _htf.Clear(); _htfSwingHigh.Clear(); _htfSwingLow.Clear();
+            _htfCur = null; _htfBucket = long.MinValue;
+            _htfPivotScanned = -1; _htfBias = Bias.Neutral;
             _curDay = DateTime.MinValue;
             _dayHigh = _dayLow = _prevDayClose = _curDayClose = 0m;
             _nextPoolId = 1;
@@ -669,6 +724,7 @@ namespace AtasBridge
 
             UpdateAtrM5(i, c);
             UpdateDailyAtr(i, c);
+            UpdateHtf(c);
             RollTodayCounters(c);
 
             // Pivot at i - PivotBars is now confirmed: it has PivotBars closed
@@ -883,6 +939,56 @@ namespace AtasBridge
 
         private static string Sign(decimal r) => (r >= 0 ? "+" : "") + r.ToString("0.00") + "R";
 
+        private static string AlignText(Align a) => a switch
+        {
+            Align.With => "顺势",
+            Align.Against => "逆势",
+            _ => "中性"
+        };
+
+        // 9H core readout: the same numbers as StatsLine() but sliced by higher
+        // timeframe alignment instead of by direction. This is the line that
+        // answers whether direction filtering is worth anything - one chart load,
+        // all three groups, no need to toggle settings and compare.
+        private string AlignStatsLine(Align a)
+        {
+            int resolved = 0, tp2 = 0, stopped = 0, hitTp1 = 0;
+            decimal rrSum = 0m, costSum = 0m, partSum = 0m;
+            decimal tp1r = Tp1Mult > 0m ? Tp1Mult : 1.5m;
+            foreach (var s in _signals)
+            {
+                if (s.Align != a) continue;
+                if (s.State != Outcome.Tp2 && s.State != Outcome.Stop) continue;
+                resolved++;
+                rrSum += s.Rr;
+                if (s.R > 0m && CostPct > 0m) costSum += 2m * (CostPct / 100m) * s.Entry / s.R;
+                if (s.State == Outcome.Tp2)
+                {
+                    tp2++; hitTp1++;
+                    partSum += 0.5m * tp1r + 0.5m * s.Rr;
+                }
+                else
+                {
+                    stopped++;
+                    if (s.HitTp1) hitTp1++;
+                    partSum += s.HitTp1 ? 0.5m * tp1r : -1m;
+                }
+            }
+            string head = AlignText(a);
+            if (resolved == 0) return head + "：已结 0 笔";
+
+            decimal avgRr = rrSum / resolved;
+            decimal gross = (tp2 * avgRr - stopped) / resolved;
+            decimal cost = costSum / resolved;
+            decimal part = partSum / resolved;
+            return head + "：已结 " + resolved + " 笔　"
+                   + "触及TP1 " + Pct(hitTp1, resolved) + "　"
+                   + "到达TP2 " + Pct(tp2, resolved) + "　"
+                   + "全进全出 " + Sign(gross) + "　"
+                   + "分批 " + Sign(part)
+                   + (cost > 0m ? "　成本 -" + cost.ToString("0.00") + "R　分批净 " + Sign(part - cost) : "");
+        }
+
         // Returns null on any out of range / throwing access. Every caller
         // checks for null; that is deliberate, a missing candle must never
         // take the indicator down.
@@ -947,6 +1053,107 @@ namespace AtasBridge
             }
             _curDayClose = c.Close;
         }
+
+        // ===================== 9H higher timeframe structure ==========
+
+        // Aggregates chart bars into HtfMinutes buckets. Only CLOSED buckets are
+        // appended to _htf, so nothing downstream can see into a bucket that is
+        // still forming - the same no-look-ahead rule the rest of the indicator
+        // follows.
+        private void UpdateHtf(IndicatorCandle c)
+        {
+            int mins = HtfMinutes > 0 ? HtfMinutes : 60;
+            DateTime t;
+            try { t = DateTime.SpecifyKind(c.Time, DateTimeKind.Utc); }
+            catch (Exception ex) { LogEx("htf bar time", ex); return; }
+
+            long bucket = t.Ticks / (TimeSpan.TicksPerMinute * mins);
+            if (_htfCur == null || bucket != _htfBucket)
+            {
+                if (_htfCur != null)
+                {
+                    _htf.Add(_htfCur);              // the bucket just closed
+                    if (_htf.Count > 4000) _htf.RemoveAt(0);
+                    ScanHtfPivots();
+                }
+                _htfBucket = bucket;
+                _htfCur = new HtfBar { Time = t, High = c.High, Low = c.Low, Close = c.Close };
+                return;
+            }
+            if (c.High > _htfCur.High) _htfCur.High = c.High;
+            if (c.Low < _htfCur.Low) _htfCur.Low = c.Low;
+            _htfCur.Close = c.Close;
+        }
+
+        // Same swing definition as the pools, just on the aggregated series.
+        private void ScanHtfPivots()
+        {
+            int n = HtfPivotBars > 0 ? HtfPivotBars : 3;
+            int p = _htf.Count - 1 - n;              // newest bar that can be confirmed
+            if (p <= _htfPivotScanned || p - n < 0) return;
+            _htfPivotScanned = p;
+
+            var c = _htf[p];
+            bool isHigh = true, isLow = true;
+            for (int k = p - n; k <= p + n; k++)
+            {
+                if (k == p) continue;
+                if (_htf[k].High >= c.High) isHigh = false;
+                if (_htf[k].Low <= c.Low) isLow = false;
+                if (!isHigh && !isLow) return;
+            }
+            if (isHigh)
+            {
+                _htfSwingHigh.Add(c.High);
+                if (_htfSwingHigh.Count > 8) _htfSwingHigh.RemoveAt(0);
+            }
+            if (isLow)
+            {
+                _htfSwingLow.Add(c.Low);
+                if (_htfSwingLow.Count > 8) _htfSwingLow.RemoveAt(0);
+            }
+            RecomputeBias();
+        }
+
+        // Classic structure read: higher high AND higher low = uptrend,
+        // lower high AND lower low = downtrend, anything else = no clear bias.
+        // Deliberately strict: a range should read Neutral, not flip-flop.
+        private void RecomputeBias()
+        {
+            if (_htfSwingHigh.Count < 2 || _htfSwingLow.Count < 2)
+            {
+                _htfBias = Bias.Neutral;
+                return;
+            }
+            decimal h1 = _htfSwingHigh[^1], h0 = _htfSwingHigh[^2];
+            decimal l1 = _htfSwingLow[^1], l0 = _htfSwingLow[^2];
+            if (h1 > h0 && l1 > l0) _htfBias = Bias.Bull;
+            else if (h1 < h0 && l1 < l0) _htfBias = Bias.Bear;
+            else _htfBias = Bias.Neutral;
+        }
+
+        private Align AlignOf(bool isLong)
+        {
+            if (_htfBias == Bias.Neutral) return Align.Neutral;
+            bool with = isLong ? _htfBias == Bias.Bull : _htfBias == Bias.Bear;
+            return with ? Align.With : Align.Against;
+        }
+
+        // Only controls drawing and sound. Statistics always count every signal,
+        // which is the whole point: one load, all three groups measured.
+        private bool IsFilteredOut(Align a)
+        {
+            if (TrendFilterMode == 1) return a == Align.Against || (a == Align.Neutral && !AllowNeutral);
+            if (TrendFilterMode == 2) return a == Align.With || (a == Align.Neutral && !AllowNeutral);
+            return false;
+        }
+
+        private static string BiasText(Bias b) => b switch
+        {
+            Bias.Bull => "多头结构(HH+HL)",
+            Bias.Bear => "空头结构(LH+LL)",
+            _ => "中性/区间"
+        };
 
         private decimal AtrD1()
         {
@@ -1312,10 +1519,12 @@ namespace AtasBridge
             decimal size = AccountEquity * RiskPct / 100m / r;
             size = Math.Floor(size / 0.001m) * 0.001m;   // round down to 0.001 BTC
 
+            var align = AlignOf(isLong);
             var sig = new Signal
             {
                 Bar = bar, IsLong = isLong, Entry = entry, Stop = stop, Tp1 = tp1, Tp2 = tp2,
                 R = r, Rr = rr, SizeBtc = size, Adr = adr, PoolId = p.Id,
+                Align = align, Filtered = IsFilteredOut(align),
                 // ADR between AdrPass and AdrInvalidate is the calibration
                 // grey zone: drawn, but visibly marked as weak.
                 Weak = adr > AdrPass, RrLow = rr < MinRR
@@ -1326,11 +1535,13 @@ namespace AtasBridge
 
             _lastEvent = (isLong ? "确认 做多 " : "确认 做空 ") + Fmt(entry) +
                          " 盈亏比=" + rr.ToString("0.0") + " ADR=" + adr.ToString("0.00") +
-                         (sig.Weak ? " 弱信号" : "") + (sig.RrLow ? " 盈亏比不足" : "");
+                         " " + AlignText(align) +
+                         (sig.Weak ? " 弱信号" : "") + (sig.RrLow ? " 盈亏比不足" : "") +
+                         (sig.Filtered ? " [已按方向过滤]" : "");
             Log(_lastEvent + " bar=" + bar + " stop=" + Fmt(stop) + " tp2=" + Fmt(tp2) +
-                " size=" + size.ToString("0.000"));
-            PlaySound(SoundFileConfirm, EnableSoundConfirm, p.Id, isLong, bar, "confirm",
-                      "SweepMarker: " + _lastEvent);
+                " size=" + size.ToString("0.000") + " 高周期=" + BiasText(_htfBias));
+            PlaySound(SoundFileConfirm, EnableSoundConfirm && !sig.Filtered,
+                      p.Id, isLong, bar, "confirm", "SweepMarker: " + _lastEvent);
         }
 
         private void RecordRejected(Pool p, int bar, bool isLong, InvalidReason reason, decimal stopPct)
@@ -1523,6 +1734,7 @@ namespace AtasBridge
         {
             foreach (var s in _signals)
             {
+                if (s.Filtered) continue;   // 9H: suppressed by the direction filter
                 int endBar = s.Bar + SignalExtendBars;
                 if (endBar < firstBar || s.Bar > lastBar) continue;
                 int x1 = cc.GetXByBar(Math.Max(s.Bar, firstBar), false);
@@ -1549,6 +1761,7 @@ namespace AtasBridge
                 if (s.RrLow) label += " | 盈亏比不足";
                 // Outcome, once the market has resolved it. Makes a replay
                 // readable at a glance instead of having to trace each line.
+                label += " | " + AlignText(s.Align);
                 if (s.State == Outcome.Tp2) label += " | 已到TP2";
                 else if (s.State == Outcome.Stop) label += s.HitTp1 ? " | 触TP1后止损" : " | 已止损";
                 else if (s.State == Outcome.Tp1) label += " | 已触TP1";
@@ -1619,6 +1832,12 @@ namespace AtasBridge
                 lines.Add(StatsLine(true));
                 lines.Add(StatsLine(false));
                 lines.Add(PartialExitLine());
+                lines.Add("高周期(" + (HtfMinutes > 0 ? HtfMinutes : 60) + "分钟)结构：" + BiasText(_htfBias)
+                          + "　过滤模式：" + (TrendFilterMode == 1 ? "只顺势" : TrendFilterMode == 2 ? "只逆势" : "关闭")
+                          + "（统计始终三组全计，过滤只影响画线与提示音）");
+                lines.Add(AlignStatsLine(Align.With));
+                lines.Add(AlignStatsLine(Align.Against));
+                lines.Add(AlignStatsLine(Align.Neutral));
             }
 
             int w = 0;
