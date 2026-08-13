@@ -272,6 +272,16 @@ namespace AtasBridge
                  Description = "TP1 距离入场多少个R。样本显示亏损单平均最大浮盈约 0.8~0.9R，把 TP1 放在这个量级附近能让更多亏损单先兑现一部分")]
         public decimal Tp1Mult { get; set; } = 1.5m;
 
+        // The single most important number for judging whether this setup is
+        // tradeable, and the one nobody looks at until it is too late.
+        // Cost in R = 2 x oneWayPct x entry / R, because position size is
+        // equity x risk% / R: the smaller R is relative to price, the more of
+        // the edge the fees eat. At entry 64000 with R = 205 and 0.045% taker,
+        // that is already 0.28R per round trip.
+        [Display(Name = "单边成本(%,含手续费与滑点)", GroupName = "4 交易", Order = 7,
+                 Description = "单边成本占名义额的百分比。币安 BTCUSDT 永续 taker 约 0.045%，扫除位市价进场的滑点通常再加 0.01~0.03%。设 0 则不计成本（统计只显示毛期望）")]
+        public decimal CostPct { get; set; } = 0.05m;
+
         // Manual account size, used only for the position size label.
         [Display(Name = "账户权益(USD)", GroupName = "4 交易", Order = 5,
                  Description = "手动填入你的真实账户资金，仅用于计算仓位标签")]
@@ -782,13 +792,15 @@ namespace AtasBridge
             // worth trading; a hit rate on its own says nothing.
             decimal avgRr = rrSum / resolved;
             decimal exp = (tp2 * avgRr - stopped) / resolved;
+            decimal cost = AvgCostR(isLong);
 
             return head + "：已结 " + resolved + " 笔　"
                    + "触及TP1 " + Pct(tp1, resolved) + "　"
                    + "到达TP2 " + Pct(tp2, resolved) + "　"
                    + "止损 " + Pct(stopped, resolved) + "　"
-                   + "期望 " + (exp >= 0 ? "+" : "") + exp.ToString("0.00") + "R　"
-                   + "平均最大浮盈 " + (mfeSum / resolved).ToString("0.0") + "R"
+                   + "毛期望 " + Sign(exp)
+                   + (cost > 0m ? "　成本 -" + cost.ToString("0.00") + "R　净期望 " + Sign(exp - cost) : "")
+                   + "　平均最大浮盈 " + (mfeSum / resolved).ToString("0.0") + "R"
                    + (lossN > 0 ? "（亏损单 " + (mfeLossSum / lossN).ToString("0.0") + "R）" : "")
                    + (running > 0 ? "　进行中 " + running + " 笔" : "");
         }
@@ -831,15 +843,42 @@ namespace AtasBridge
             return n > 0 ? sum / n : 0m;
         }
 
+        // Average round-trip cost expressed in R. Partial exits do not change it:
+        // entry is full size, then 0.5 + 0.5 on the way out, so traded volume is
+        // still 2x position size.
+        private decimal AvgCostR(bool isLong)
+        {
+            if (CostPct <= 0m) return 0m;
+            decimal sum = 0m;
+            int n = 0;
+            foreach (var s in _signals)
+            {
+                if (s.IsLong != isLong) continue;
+                if (s.State != Outcome.Tp2 && s.State != Outcome.Stop) continue;
+                if (s.R <= 0m) continue;
+                sum += 2m * (CostPct / 100m) * s.Entry / s.R;
+                n++;
+            }
+            return n > 0 ? sum / n : 0m;
+        }
+
         private string PartialExitLine()
         {
             decimal el = PartialExpectancy(true, out int nl);
             decimal es = PartialExpectancy(false, out int ns);
             int tot = nl + ns;
             decimal all = tot > 0 ? (el * nl + es * ns) / tot : 0m;
-            return "分批口径(TP1减半仓+移保本)：做多 " + Sign(el) + "　做空 " + Sign(es)
-                   + "　合计 " + Sign(all) + "　（共 " + tot + " 笔，TP1="
-                   + (Tp1Mult > 0m ? Tp1Mult : 1.5m).ToString("0.#") + "R）";
+            decimal cl = AvgCostR(true), cs = AvgCostR(false);
+            decimal cAll = tot > 0 ? (cl * nl + cs * ns) / tot : 0m;
+            string s = "分批口径(TP1减半仓+移保本)：做多 " + Sign(el) + "　做空 " + Sign(es)
+                       + "　合计 " + Sign(all);
+            if (cAll > 0m)
+                s += "　||　扣成本后：做多 " + Sign(el - cl) + "　做空 " + Sign(es - cs)
+                     + "　合计 " + Sign(all - cAll);
+            s += "　（共 " + tot + " 笔，TP1="
+                 + (Tp1Mult > 0m ? Tp1Mult : 1.5m).ToString("0.#") + "R，成本 "
+                 + CostPct.ToString("0.###") + "%/单边）";
+            return s;
         }
 
         private static string Sign(decimal r) => (r >= 0 ? "+" : "") + r.ToString("0.00") + "R";
