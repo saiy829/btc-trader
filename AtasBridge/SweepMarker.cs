@@ -256,8 +256,14 @@ namespace AtasBridge
 
         // Below this reward/risk the trade is drawn but greyed out.
         [Display(Name = "最低盈亏比", GroupName = "4 交易", Order = 4,
-                 Description = "盈亏比低于此值仍会画出来，但整组线变灰并标注「RR LOW」")]
+                 Description = "盈亏比低于此值仍会画出来，但整组线变灰并标注「盈亏比不足」")]
         public decimal MinRR { get; set; } = 2.0m;
+
+        // Evidence for this one: a replay produced a signal with RR 11.1 whose
+        // TP2 sat on a pool far out of reach; it touched TP1 and then stopped.
+        [Display(Name = "TP2最大R(超出则退回3R)", GroupName = "4 交易", Order = 5,
+                 Description = "对面的池太远时目标不现实。若选中的池超过此倍数R，TP2 改用 3R。设 0 表示不限制")]
+        public decimal MaxTp2R { get; set; } = 5.0m;
 
         // Manual account size, used only for the position size label.
         [Display(Name = "账户权益(USD)", GroupName = "4 交易", Order = 5,
@@ -397,6 +403,12 @@ namespace AtasBridge
             public Outcome State = Outcome.Open;
             public bool HitTp1;
             public int ResolvedBar = -1;
+            // Maximum favourable / adverse excursion in R. MFE is the honest way
+            // to judge whether a target sits too far out: if the average MFE of
+            // the losers is well below TP1, TP1 is unreachable and the exit plan
+            // is wrong, not the entry.
+            public decimal MaxFavR;
+            public decimal MaxAdvR;
         }
 
         private sealed class InvalidMark
@@ -680,6 +692,14 @@ namespace AtasBridge
                 if (s.State == Outcome.Tp2 || s.State == Outcome.Stop) continue;
                 if (i <= s.Bar) continue;
 
+                if (s.R > 0m)
+                {
+                    decimal fav = s.IsLong ? (c.High - s.Entry) / s.R : (s.Entry - c.Low) / s.R;
+                    decimal adv = s.IsLong ? (s.Entry - c.Low) / s.R : (c.High - s.Entry) / s.R;
+                    if (fav > s.MaxFavR) s.MaxFavR = fav;
+                    if (adv > s.MaxAdvR) s.MaxAdvR = adv;
+                }
+
                 bool stopHit = s.IsLong ? c.Low <= s.Stop : c.High >= s.Stop;
                 bool tp2Hit = s.IsLong ? c.High >= s.Tp2 : c.Low <= s.Tp2;
                 bool tp1Hit = s.IsLong ? c.High >= s.Tp1 : c.Low <= s.Tp1;
@@ -689,6 +709,7 @@ namespace AtasBridge
                     if (tp1Hit) s.HitTp1 = true;   // touched before being stopped
                     s.State = Outcome.Stop;
                     s.ResolvedBar = i;
+                    LogOutcome(s);
                     continue;
                 }
                 if (tp2Hit)
@@ -696,6 +717,7 @@ namespace AtasBridge
                     s.HitTp1 = true;               // TP2 is beyond TP1 by construction
                     s.State = Outcome.Tp2;
                     s.ResolvedBar = i;
+                    LogOutcome(s);
                     continue;
                 }
                 if (tp1Hit)
@@ -706,19 +728,40 @@ namespace AtasBridge
             }
         }
 
+        // One line per resolved signal so a replay can be analysed offline
+        // instead of squinting at the chart.
+        private void LogOutcome(Signal s)
+        {
+            Log("结果 " + (s.IsLong ? "做多" : "做空")
+                + " 入场=" + Fmt(s.Entry)
+                + " R=" + s.R.ToString("0.#")
+                + " 盈亏比=" + s.Rr.ToString("0.0")
+                + " 结局=" + (s.State == Outcome.Tp2 ? "到达TP2"
+                              : (s.HitTp1 ? "触TP1后止损" : "直接止损"))
+                + " 最大浮盈=" + s.MaxFavR.ToString("0.00") + "R"
+                + " 最大浮亏=" + s.MaxAdvR.ToString("0.00") + "R"
+                + " 用时=" + (s.ResolvedBar - s.Bar) + "根"
+                + " ADR=" + s.Adr.ToString("0.00")
+                + (s.Weak ? " 弱信号" : ""));
+        }
+
         // Hit rates per direction. "已结" counts signals that reached TP2 or the
         // stop; a signal sitting on TP1 is still running, so it is excluded from
         // the denominator to avoid flattering the numbers.
         private string StatsLine(bool isLong)
         {
             int resolved = 0, tp1 = 0, tp2 = 0, stopped = 0, running = 0;
+            decimal mfeSum = 0m, mfeLossSum = 0m;
+            int lossN = 0;
+            decimal rrSum = 0m;
             foreach (var s in _signals)
             {
                 if (s.IsLong != isLong) continue;
-                if (s.State == Outcome.Tp2) { resolved++; tp2++; tp1++; }
+                if (s.State == Outcome.Tp2) { resolved++; tp2++; tp1++; mfeSum += s.MaxFavR; rrSum += s.Rr; }
                 else if (s.State == Outcome.Stop)
                 {
-                    resolved++; stopped++;
+                    resolved++; stopped++; mfeSum += s.MaxFavR; rrSum += s.Rr;
+                    mfeLossSum += s.MaxFavR; lossN++;
                     if (s.HitTp1) tp1++;
                 }
                 else running++;
@@ -726,10 +769,20 @@ namespace AtasBridge
             string head = isLong ? "做多" : "做空";
             if (resolved == 0)
                 return head + "：已结 0 笔　进行中 " + running + " 笔";
+
+            // Expectancy in R, assuming a full exit at TP2 and -1R on a stop.
+            // This is the number that actually decides whether the direction is
+            // worth trading; a hit rate on its own says nothing.
+            decimal avgRr = rrSum / resolved;
+            decimal exp = (tp2 * avgRr - stopped) / resolved;
+
             return head + "：已结 " + resolved + " 笔　"
                    + "触及TP1 " + Pct(tp1, resolved) + "　"
                    + "到达TP2 " + Pct(tp2, resolved) + "　"
-                   + "止损 " + Pct(stopped, resolved)
+                   + "止损 " + Pct(stopped, resolved) + "　"
+                   + "期望 " + (exp >= 0 ? "+" : "") + exp.ToString("0.00") + "R　"
+                   + "平均最大浮盈 " + (mfeSum / resolved).ToString("0.0") + "R"
+                   + (lossN > 0 ? "（亏损单 " + (mfeLossSum / lossN).ToString("0.0") + "R）" : "")
                    + (running > 0 ? "　进行中 " + running + " 笔" : "");
         }
 
@@ -1154,6 +1207,10 @@ namespace AtasBridge
             // pool qualifies is what the card already specifies for "no usable
             // BSL".
             decimal tp2 = NearestUsableOppositePool(entry, isLong, r);
+            // Too far is as useless as too close: a pool 11R away is not a
+            // target, it is a wish. Replay evidence: the RR 11.1 signal touched
+            // TP1 and then stopped out.
+            if (tp2 > 0m && MaxTp2R > 0m && Math.Abs(tp2 - entry) / r > MaxTp2R) tp2 = 0m;
             if (tp2 <= 0m) tp2 = isLong ? entry + 3.0m * r : entry - 3.0m * r;
 
             decimal rr = Math.Abs(tp2 - entry) / r;
