@@ -155,20 +155,23 @@ namespace AtasBridge
         // significant pools; lower = more pools, more noise.
         [Display(Name = "摆动点左右K数", GroupName = "1 流动性池", Order = 1,
                  Description = "某根K的高点要高过左右各N根才算摆动高点。调大=池更少但更重要；调小=池更多也更嘈杂")]
-        public int PivotBars { get; set; } = 5;
+        public int PivotBars { get => _pivotBars; set => SetCalc(ref _pivotBars, value); }
+        private int _pivotBars = 5;
 
         // How far back pools stay relevant. Older liquidity is usually already
         // taken and no longer attracts price.
         [Display(Name = "池回溯天数", GroupName = "1 流动性池", Order = 2,
                  Description = "超过这个天数的池视为过期。更早的流动性通常已被取走，不再吸引价格")]
-        public int LookbackDays { get; set; } = 3;
+        public int LookbackDays { get => _lookbackDays; set => SetCalc(ref _lookbackDays, value); }
+        private int _lookbackDays = 3;
 
         // Two swings closer than this (in daily ATR) are the same liquidity
         // shelf: equal highs / equal lows. Merging them avoids double signals
         // and flags the stronger double top / double bottom pattern.
         [Display(Name = "等高等低合并容差(×日ATR)", GroupName = "1 流动性池", Order = 3,
                  Description = "两个同类摆动点价差小于此值即视为同一条流动性架并合并，线右端 xN 就是合并数。若普遍出现 x8 以上说明此值太宽，建议改 0.03~0.05")]
-        public decimal EqualTolerance { get; set; } = 0.1m;
+        public decimal EqualTolerance { get => _equalTol; set => SetCalc(ref _equalTol, value); }
+        private decimal _equalTol = 0.1m;
 
         // ================= settings: sweep detection ====================
 
@@ -176,34 +179,40 @@ namespace AtasBridge
         // Pure performance / noise filter: far away pools cannot be swept now.
         [Display(Name = "预备距离(×5分ATR)", GroupName = "2 扫除检测", Order = 1,
                  Description = "价格进入池的这个距离内才开始监控该池。纯降噪与性能过滤：离得远的池当下不可能被扫")]
-        public decimal ArmDistance { get; set; } = 0.5m;
+        public decimal ArmDistance { get => _armDist; set => SetCalc(ref _armDist, value); }
+        private decimal _armDist = 0.5m;
 
         // Minimum penetration to call it a sweep rather than a touch.
         [Display(Name = "最小穿透(×5分ATR)", GroupName = "2 扫除检测", Order = 2,
                  Description = "至少要刺穿这么深才算扫除，否则只是触碰。调大=只认明确的插针")]
-        public decimal MinPenetration { get; set; } = 0.05m;
+        public decimal MinPenetration { get => _minPen; set => SetCalc(ref _minPen, value); }
+        private decimal _minPen = 0.05m;
 
         // Beyond this the move is a real breakout, not a stop run.
         [Display(Name = "最大穿透(×5分ATR)", GroupName = "2 扫除检测", Order = 3,
                  Description = "刺穿超过这么深就是真突破而不是扫止损，该次直接作废")]
-        public decimal MaxPenetration { get; set; } = 1.5m;
+        public decimal MaxPenetration { get => _maxPen; set => SetCalc(ref _maxPen, value); }
+        private decimal _maxPen = 1.5m;
 
         // Delta spike percentile. A sweep is one-sided aggression, so the
         // sweeping bar's delta should sit in the tail of the recent
         // distribution (low tail for a long setup, high tail for a short).
         [Display(Name = "Delta尖峰分位(%)", GroupName = "2 扫除检测", Order = 4,
                  Description = "扫除是单边猛攻，所以扫除那根K的Delta要落在近期分布的尾部：做多看低尾(5%)，做空看高尾(95%)。信号太少可放宽到 10")]
-        public decimal DeltaPercentile { get; set; } = 5m;
+        public decimal DeltaPercentile { get => _deltaPct; set => SetCalc(ref _deltaPct, value); }
+        private decimal _deltaPct = 5m;
 
         // Volume burst multiple over the recent median. Stop runs trade a lot.
         [Display(Name = "爆量倍数", GroupName = "2 扫除检测", Order = 5,
                  Description = "当前K成交量需达到近期中位数的这个倍数。扫止损必然伴随放量。信号太少可降到 2")]
-        public decimal VolMultiple { get; set; } = 3.0m;
+        public decimal VolMultiple { get => _volMult; set => SetCalc(ref _volMult, value); }
+        private decimal _volMult = 3.0m;
 
         // Sample size for the percentile and the median above.
         [Display(Name = "分位与中位回看K数", GroupName = "2 扫除检测", Order = 6,
                  Description = "计算上面分位数与中位数的样本量。只取已收盘K线，不含当前未收盘K（避免前视偏差）")]
-        public int DeltaVolLookback { get; set; } = 50;
+        public int DeltaVolLookback { get => _dvLookback; set => SetCalc(ref _dvLookback, value); }
+        private int _dvLookback = 50;
 
         // ================= settings: confirmation ======================
 
@@ -211,30 +220,35 @@ namespace AtasBridge
         // sweep snaps back fast.
         [Display(Name = "收回时限(K数)", GroupName = "3 确认", Order = 1,
                  Description = "价格最多允许在池外停留几根K。真扫除会很快收回；超时即作废")]
-        public int ReclaimBars { get; set; } = 3;
+        public int ReclaimBars { get => _reclaimBars; set => SetCalc(ref _reclaimBars, value); }
+        private int _reclaimBars = 3;
 
         // ADR = aggression decay ratio: cumulative |delta| after the sweep bar
         // divided by the sweep bar |delta|. Low ADR means the aggression died
         // out, which is what a failed breakout looks like.
         [Display(Name = "ADR达标阈值", GroupName = "3 确认", Order = 2,
                  Description = "ADR = 扫除后累计|Delta| ÷ 扫除那根K的|Delta|。低于此值算干净信号（突破方力气用尽）")]
-        public decimal AdrPass { get; set; } = 0.8m;
+        public decimal AdrPass { get => _adrPass; set => SetCalc(ref _adrPass, value); }
+        private decimal _adrPass = 0.8m;
 
         // Above this the aggression is still running: treat as real breakout.
         [Display(Name = "ADR作废阈值", GroupName = "3 确认", Order = 3,
                  Description = "ADR 高于此值说明主动量还在持续，判定为真突破并作废。介于达标与作废之间会画出来但标 WEAK")]
-        public decimal AdrInvalidate { get; set; } = 1.5m;
+        public decimal AdrInvalidate { get => _adrInv; set => SetCalc(ref _adrInv, value); }
+        private decimal _adrInv = 1.5m;
 
         // Passive side / aggressive side volume at one price. High ratio means
         // limit orders absorbed the market orders, i.e. someone defended.
         [Display(Name = "吸收比", GroupName = "3 确认", Order = 4,
                  Description = "同一价位上被动挂单量 ÷ 主动成交量。比值高说明限价单吃掉了市价单，即有人在此护盘")]
-        public decimal AbsorptionRatio { get; set; } = 2.0m;
+        public decimal AbsorptionRatio { get => _absRatio; set => SetCalc(ref _absRatio, value); }
+        private decimal _absRatio = 2.0m;
 
         // Absorption below this size is noise, not a real defender.
         [Display(Name = "吸收最小量(BTC)", GroupName = "3 确认", Order = 5,
                  Description = "单一价位吸收量低于此值视为噪声，不算真正的护盘方")]
-        public decimal AbsorptionMinBtc { get; set; } = 5.0m;
+        public decimal AbsorptionMinBtc { get => _absMin; set => SetCalc(ref _absMin, value); }
+        private decimal _absMin = 5.0m;
 
         // ================= settings: trade math ========================
 
@@ -242,35 +256,41 @@ namespace AtasBridge
         // clip it.
         [Display(Name = "止损缓冲(×5分ATR)", GroupName = "4 交易", Order = 1,
                  Description = "止损放在扫除最低/最高点之外这么远，避免回踩时被扫掉")]
-        public decimal StopBuffer { get; set; } = 0.3m;
+        public decimal StopBuffer { get => _stopBuf; set => SetCalc(ref _stopBuf, value); }
+        private decimal _stopBuf = 0.3m;
 
         // Too tight a stop gets taken out by noise.
         [Display(Name = "最小止损距离(%)", GroupName = "4 交易", Order = 2,
                  Description = "止损比这还近就不画信号：太紧会被正常波动打掉")]
-        public decimal MinStopPct { get; set; } = 0.15m;
+        public decimal MinStopPct { get => _minStopPct; set => SetCalc(ref _minStopPct, value); }
+        private decimal _minStopPct = 0.15m;
 
         // Too wide a stop makes position size meaningless.
         [Display(Name = "最大止损距离(%)", GroupName = "4 交易", Order = 3,
                  Description = "止损比这还远就不画信号：太宽会让仓位计算失去意义")]
-        public decimal MaxStopPct { get; set; } = 0.8m;
+        public decimal MaxStopPct { get => _maxStopPct; set => SetCalc(ref _maxStopPct, value); }
+        private decimal _maxStopPct = 0.8m;
 
         // Below this reward/risk the trade is drawn but greyed out.
         [Display(Name = "最低盈亏比", GroupName = "4 交易", Order = 4,
                  Description = "盈亏比低于此值仍会画出来，但整组线变灰并标注「盈亏比不足」")]
-        public decimal MinRR { get; set; } = 2.0m;
+        public decimal MinRR { get => _minRr; set => SetCalc(ref _minRr, value); }
+        private decimal _minRr = 2.0m;
 
         // Evidence for this one: a replay produced a signal with RR 11.1 whose
         // TP2 sat on a pool far out of reach; it touched TP1 and then stopped.
         [Display(Name = "TP2最大R(超出则退回3R)", GroupName = "4 交易", Order = 5,
                  Description = "对面的池太远时目标不现实。若选中的池超过此倍数R，TP2 改用 3R。设 0 表示不限制")]
-        public decimal MaxTp2R { get; set; } = 5.0m;
+        public decimal MaxTp2R { get => _maxTp2R; set => SetCalc(ref _maxTp2R, value); }
+        private decimal _maxTp2R = 5.0m;
 
         // Was hardcoded at 1.5 until v2026.08.13-2. Opened up because the
         // 469-signal sample shows losers reaching 0.8~0.9R on average, so where
         // TP1 sits decides how much of that is captured.
         [Display(Name = "TP1倍数(R)", GroupName = "4 交易", Order = 6,
                  Description = "TP1 距离入场多少个R。样本显示亏损单平均最大浮盈约 0.8~0.9R，把 TP1 放在这个量级附近能让更多亏损单先兑现一部分")]
-        public decimal Tp1Mult { get; set; } = 1.5m;
+        public decimal Tp1Mult { get => _tp1Mult; set => SetCalc(ref _tp1Mult, value); }
+        private decimal _tp1Mult = 1.5m;
 
         // The single most important number for judging whether this setup is
         // tradeable, and the one nobody looks at until it is too late.
@@ -285,12 +305,14 @@ namespace AtasBridge
         // Manual account size, used only for the position size label.
         [Display(Name = "账户权益(USD)", GroupName = "4 交易", Order = 5,
                  Description = "手动填入你的真实账户资金，仅用于计算仓位标签")]
-        public decimal AccountEquity { get; set; } = 10000m;
+        public decimal AccountEquity { get => _equity; set => SetCalc(ref _equity, value); }
+        private decimal _equity = 10000m;
 
         // Risk per trade as a percentage of equity.
         [Display(Name = "单笔风险(%)", GroupName = "4 交易", Order = 6,
                  Description = "单笔愿承担的风险占权益的百分比。仓位 = 权益×风险% ÷ 止损距离，向下取整到 0.001 BTC")]
-        public decimal RiskPct { get; set; } = 1.0m;
+        public decimal RiskPct { get => _riskPct; set => SetCalc(ref _riskPct, value); }
+        private decimal _riskPct = 1.0m;
 
         // ================= settings: display ==========================
 
@@ -348,11 +370,13 @@ namespace AtasBridge
 
         [Display(Name = "高周期(分钟)", GroupName = "7 高周期过滤", Order = 1,
                  Description = "用于判定大方向的周期，60=H1，240=H4。图表K线会按此长度聚合成高周期K线，再在其上判定市场结构")]
-        public int HtfMinutes { get; set; } = 60;
+        public int HtfMinutes { get => _htfMin; set => SetCalc(ref _htfMin, value); }
+        private int _htfMin = 60;
 
         [Display(Name = "高周期摆动点左右K数", GroupName = "7 高周期过滤", Order = 2,
                  Description = "在高周期K上判定摆动点时左右各需多少根。调大=结构更粗更稳，调小=更灵敏但易翻转")]
-        public int HtfPivotBars { get; set; } = 3;
+        public int HtfPivotBars { get => _htfPivot; set => SetCalc(ref _htfPivot, value); }
+        private int _htfPivot = 3;
 
         // int rather than an enum: ATAS shows enum member names verbatim and
         // Chinese identifiers in code would break the "code in English"
@@ -365,11 +389,13 @@ namespace AtasBridge
         // higher timeframe is ranging" is the filter that actually separates.
         [Display(Name = "方向过滤模式(0关闭/1只顺势/2只逆势/3只区间)", GroupName = "7 高周期过滤", Order = 3,
                  Description = "0=关闭，全部画出并提示；1=只保留顺势；2=只保留逆势（对照组）；3=只保留高周期区间中的信号 —— 实测该子集表现最好，因为本 setup 是均值回归型，趋势环境里失效。⚠ 无论设成几，统计里三组都照常分开计数，设 0 加载一次即可同时看到三组表现")]
-        public int TrendFilterMode { get; set; } = 0;
+        public int TrendFilterMode { get => _trendMode; set => SetCalc(ref _trendMode, value); }
+        private int _trendMode;
 
         [Display(Name = "中性时放行", GroupName = "7 高周期过滤", Order = 4,
                  Description = "高周期结构不明确（既非HH+HL也非LH+LL）时是否放行。关掉则只在结构明确时才出信号")]
-        public bool AllowNeutral { get; set; } = true;
+        public bool AllowNeutral { get => _allowNeutral; set => SetCalc(ref _allowNeutral, value); }
+        private bool _allowNeutral = true;
 
         [Display(Name = "预警音(扫除进行中)", GroupName = "6 声音", Order = 1,
                  Description = "阶段一：扫除正在发生。听到后做准备，不要立刻进场")]
@@ -575,6 +601,25 @@ namespace AtasBridge
         }
 
         private static Color ToDrawing(SeriesColor c) => Color.FromArgb(c.A, c.R, c.G, c.B);
+
+        // Every setting that changes how signals are GENERATED goes through
+        // this, so changing it forces a full recalculation.
+        //
+        // Why it exists (2026-08-13): Sea set the minimum stop distance to 0.5%
+        // and the panel still reported a cost of 0.35~0.40R. That is
+        // arithmetically impossible - cost(R) = 2 x fee% / stop%, so a 0.5% floor
+        // caps cost at 0.20R - which proved the statistics were still the ones
+        // computed under the OLD parameter while the panel label (read live from
+        // the property) already showed the new value. Without a forced
+        // recalculation a settings change silently mixes old signals with new
+        // labels, and every measurement taken afterwards is worthless.
+        private void SetCalc<T>(ref T field, T value)
+        {
+            if (Equals(field, value)) return;
+            field = value;
+            try { RecalculateValues(); }
+            catch (Exception ex) { LogEx("RecalculateValues", ex); }
+        }
 
         private void Log(string msg)
         {
