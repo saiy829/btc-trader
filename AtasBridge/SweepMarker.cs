@@ -298,9 +298,41 @@ namespace AtasBridge
         // equity x risk% / R: the smaller R is relative to price, the more of
         // the edge the fees eat. At entry 64000 with R = 205 and 0.045% taker,
         // that is already 0.28R per round trip.
-        [Display(Name = "单边成本(%,含手续费与滑点)", GroupName = "4 交易", Order = 7,
-                 Description = "单边成本占名义额的百分比。币安 BTCUSDT 永续 taker 约 0.045%，扫除位市价进场的滑点通常再加 0.01~0.03%。设 0 则不计成本（统计只显示毛期望）")]
+        [Display(Name = "taker费率(%,单边,含滑点)", GroupName = "8 限价进场", Order = 4,
+                 Description = "市价口径的单边成本。币安 BTCUSDT 永续 taker 约 0.045%，扫除位市价进场的滑点通常再加 0.01~0.03%。设 0 则不计成本（统计只显示毛期望）")]
         public decimal CostPct { get; set; } = 0.05m;
+
+        // ================= settings: limit entry (card 9I) =============
+        // 9H ended at exactly break-even: gross +0.17R against a taker cost of
+        // 0.16R. Since cost(R) = 2 x fee% x price / R, moving the entry from
+        // taker to maker is the single biggest lever left - on paper
+        // 0.16R -> 0.074R. The catch, and the reason this must be measured
+        // rather than just calculated: a resting order only fills on a pullback,
+        // so it changes WHICH signals get taken, not merely what they cost.
+
+        [Display(Name = "进场模式(0市价/1限价)", GroupName = "8 限价进场", Order = 1,
+                 Description = "0=市价，按确认K收盘价入场（9H 口径）；1=限价，在回撤位挂单等成交。⚠ 无论设成几，面板三组统计（限价成交/限价未成交/全市价基线）都照常全部计算，加载一次即可对比")]
+        public int EntryMode { get => _entryMode; set => SetCalc(ref _entryMode, value); }
+        private int _entryMode = 1;
+
+        // How far below the confirmation close the order rests, in units of the
+        // market-path R. Deeper = better fill price and lower cost per R, but
+        // fewer fills.
+        [Display(Name = "限价回撤(R)", GroupName = "8 限价进场", Order = 2,
+                 Description = "挂单价距确认K收盘价多少个R（以市价口径的R为基准）。挂得越深价格越好、成交率越低。⚠ 必须 < 1.0：达到 1.0 时挂单价正好落在止损上，触发即止损，该信号会被判为「限价无效」并计入面板")]
+        public decimal LimitOffsetR { get => _limitOffsetR; set => SetCalc(ref _limitOffsetR, value); }
+        private decimal _limitOffsetR = 0.3m;
+
+        [Display(Name = "限价超时(根)", GroupName = "8 限价进场", Order = 3,
+                 Description = "挂单最多等待几根M5，超时撤单记为未成交。从确认K的【下一根】开始计 —— 确认K自身的低点在信号成立之前就已形成，用它判成交属于前视偏差")]
+        public int LimitTimeoutBars { get => _limitTimeout; set => SetCalc(ref _limitTimeout, value); }
+        private int _limitTimeout = 3;
+
+        // A setting rather than a constant because exchange fee tiers change;
+        // hardcoding it would quietly falsify every cost number on the panel.
+        [Display(Name = "maker费率(%,单边)", GroupName = "8 限价进场", Order = 5,
+                 Description = "限价成交的单边费率，用于限价组的成本计算。币安 BTCUSDT 永续 maker 约 0.018%，挂单成交几乎无滑点，留余量取 0.023%")]
+        public decimal MakerPct { get; set; } = 0.023m;
 
         // Manual account size, used only for the position size label.
         [Display(Name = "账户权益(USD)", GroupName = "4 交易", Order = 5,
@@ -501,6 +533,18 @@ namespace AtasBridge
             // is what lets one chart load answer "does direction matter".
             public Align Align = Align.Neutral;
             public bool Filtered;   // suppressed by the filter: not drawn, no sound
+
+            // --- 9I: the limit path, simulated in parallel with the market one ---
+            // The market fields above stay untouched so they remain exactly the
+            // 9H baseline; everything limit-specific lives here.
+            public decimal LimitPrice;
+            public bool LimitInvalid;    // order price would sit at or beyond the stop
+            public bool LimitFilled;
+            public bool LimitExpired;    // timed out without being touched
+            public int LimitFillBar = -1;
+            public decimal LimitEntry, LimitR, LimitTp1, LimitRr;
+            public Outcome LimitState = Outcome.Open;
+            public bool LimitHitTp1;
         }
 
         private sealed class InvalidMark
@@ -850,6 +894,74 @@ namespace AtasBridge
                     s.State = Outcome.Tp1;
                 }
             }
+
+            TrackLimitPath(i, c);
+        }
+
+        // 9I: the limit path runs alongside the market path on the same bars.
+        // Two stages - wait for a fill, then track the outcome from the fill
+        // price. Fills are judged on Low/High, not the close: a resting order is
+        // taken the moment price trades through it, intrabar.
+        private void TrackLimitPath(int i, IndicatorCandle c)
+        {
+            foreach (var s in _signals)
+            {
+                if (s.LimitInvalid) continue;
+                if (s.LimitState == Outcome.Tp2 || s.LimitState == Outcome.Stop) continue;
+
+                // ---- stage 1: waiting to be filled ----
+                if (!s.LimitFilled)
+                {
+                    if (s.LimitExpired) continue;
+                    int since = i - s.Bar;
+                    // Strictly AFTER the confirmation bar. That bar's low was
+                    // already printed before the signal existed, so using it
+                    // would be look-ahead.
+                    if (since < 1) continue;
+                    if (since > LimitTimeoutBars) { s.LimitExpired = true; continue; }
+
+                    bool touched = s.IsLong ? c.Low <= s.LimitPrice : c.High >= s.LimitPrice;
+                    if (!touched) continue;
+
+                    s.LimitFilled = true;
+                    s.LimitFillBar = i;
+                    s.LimitEntry = s.LimitPrice;
+                    s.LimitR = Math.Abs(s.LimitEntry - s.Stop);
+                    if (s.LimitR <= 0m) { s.LimitInvalid = true; s.LimitFilled = false; continue; }
+                    decimal m = Tp1Mult > 0m ? Tp1Mult : 1.5m;
+                    s.LimitTp1 = s.IsLong ? s.LimitEntry + m * s.LimitR : s.LimitEntry - m * s.LimitR;
+                    // TP2 price is unchanged (same opposite pool), but expressed
+                    // in the smaller limit R the multiple is larger.
+                    s.LimitRr = Math.Abs(s.Tp2 - s.LimitEntry) / s.LimitR;
+                    // fall through: the fill bar itself can also resolve it
+                }
+
+                if (i < s.LimitFillBar) continue;
+
+                bool stopHit = s.IsLong ? c.Low <= s.Stop : c.High >= s.Stop;
+                bool tp2Hit = s.IsLong ? c.High >= s.Tp2 : c.Low <= s.Tp2;
+                bool tp1Hit = s.IsLong ? c.High >= s.LimitTp1 : c.Low <= s.LimitTp1;
+
+                // Same conservative rule as the market path: when one bar spans
+                // both the stop and a target, assume the stop went first.
+                if (stopHit)
+                {
+                    if (tp1Hit) s.LimitHitTp1 = true;
+                    s.LimitState = Outcome.Stop;
+                    continue;
+                }
+                if (tp2Hit)
+                {
+                    s.LimitHitTp1 = true;
+                    s.LimitState = Outcome.Tp2;
+                    continue;
+                }
+                if (tp1Hit)
+                {
+                    s.LimitHitTp1 = true;
+                    s.LimitState = Outcome.Tp1;
+                }
+            }
         }
 
         // One line per resolved signal so a replay can be analysed offline
@@ -989,6 +1101,128 @@ namespace AtasBridge
         }
 
         private static string Sign(decimal r) => (r >= 0 ? "+" : "") + r.ToString("0.00") + "R";
+
+        // ===================== 9I: three parallel accountings ==========
+        //
+        // A resting order changes WHICH signals get taken, not just their cost,
+        // and the ones it misses are NOT a random sample. So all three books are
+        // kept at once and shown together:
+        //   A 限价成交    - filled, settled at maker rates on the limit R
+        //   B 限价未成交  - not filled, but reported under their MARKET outcome,
+        //                   which is the only way to see whether the misses were
+        //                   good trades or bad ones
+        //   C 全市价基线  - every signal on the market path = the 9H baseline
+        // Comparing A against B is the whole experiment; C is the control.
+
+        // Group A: limit fills, maker cost, limit R.
+        private string LimitFilledLine()
+        {
+            int filled = 0, expired = 0, invalid = 0, resolved = 0, tp1 = 0, tp2 = 0, stopped = 0;
+            decimal partSum = 0m, costSum = 0m, grossSum = 0m;
+            decimal m = Tp1Mult > 0m ? Tp1Mult : 1.5m;
+            foreach (var s in _signals)
+            {
+                if (s.LimitInvalid) { invalid++; continue; }
+                if (s.LimitExpired) { expired++; continue; }
+                if (!s.LimitFilled) continue;          // still resting
+                filled++;
+                if (s.LimitState != Outcome.Tp2 && s.LimitState != Outcome.Stop) continue;
+                resolved++;
+                if (s.LimitR > 0m && MakerPct > 0m)
+                    costSum += 2m * (MakerPct / 100m) * s.LimitEntry / s.LimitR;
+                if (s.LimitState == Outcome.Tp2)
+                {
+                    tp2++; tp1++;
+                    partSum += 0.5m * m + 0.5m * s.LimitRr;
+                    grossSum += s.LimitRr;
+                }
+                else
+                {
+                    stopped++;
+                    if (s.LimitHitTp1) tp1++;
+                    partSum += s.LimitHitTp1 ? 0.5m * m : -1m;
+                    grossSum += -1m;
+                }
+            }
+            int attempts = filled + expired;
+            string head = "限价成交：已结 " + resolved + " 笔　成交率 "
+                          + (attempts > 0 ? (filled * 100m / attempts).ToString("0") + "%(" + filled + "/" + attempts + ")" : "-")
+                          + (invalid > 0 ? "　限价无效 " + invalid + " 笔" : "");
+            if (resolved == 0) return head;
+            decimal cost = costSum / resolved;
+            decimal part = partSum / resolved;
+            return head + "　触及TP1 " + Pct(tp1, resolved) + "　到达TP2 " + Pct(tp2, resolved)
+                   + "　全进全出 " + Sign(grossSum / resolved)
+                   + "　分批 " + Sign(part)
+                   + (cost > 0m ? "　成本 -" + cost.ToString("0.00") + "R　分批净 " + Sign(part - cost) : "");
+        }
+
+        // Group B: the ones the resting order missed, scored on the market path.
+        // If these look BETTER than group A, the limit entry is skipping the good
+        // trades and the saved fees are an illusion.
+        private string LimitMissedLine()
+        {
+            int n = 0, tp2 = 0, tp1 = 0, stopped = 0;
+            decimal partSum = 0m, grossSum = 0m;
+            decimal m = Tp1Mult > 0m ? Tp1Mult : 1.5m;
+            foreach (var s in _signals)
+            {
+                if (!s.LimitExpired) continue;
+                if (s.State != Outcome.Tp2 && s.State != Outcome.Stop) continue;
+                n++;
+                if (s.State == Outcome.Tp2)
+                {
+                    tp2++; tp1++;
+                    partSum += 0.5m * m + 0.5m * s.Rr;
+                    grossSum += s.Rr;
+                }
+                else
+                {
+                    stopped++;
+                    if (s.HitTp1) tp1++;
+                    partSum += s.HitTp1 ? 0.5m * m : -1m;
+                    grossSum += -1m;
+                }
+            }
+            if (n == 0) return "限价未成交：0 笔";
+            return "限价未成交：" + n + " 笔（按市价口径结算）　触及TP1 " + Pct(tp1, n)
+                   + "　到达TP2 " + Pct(tp2, n)
+                   + "　全进全出 " + Sign(grossSum / n)
+                   + "　分批毛 " + Sign(partSum / n);
+        }
+
+        // Group C: control - every signal on the market path, taker cost.
+        private string MarketBaselineLine()
+        {
+            int n = 0, tp2 = 0, tp1 = 0;
+            decimal partSum = 0m, costSum = 0m, grossSum = 0m;
+            decimal m = Tp1Mult > 0m ? Tp1Mult : 1.5m;
+            foreach (var s in _signals)
+            {
+                if (s.State != Outcome.Tp2 && s.State != Outcome.Stop) continue;
+                n++;
+                if (s.R > 0m && CostPct > 0m) costSum += 2m * (CostPct / 100m) * s.Entry / s.R;
+                if (s.State == Outcome.Tp2)
+                {
+                    tp2++; tp1++;
+                    partSum += 0.5m * m + 0.5m * s.Rr;
+                    grossSum += s.Rr;
+                }
+                else
+                {
+                    if (s.HitTp1) tp1++;
+                    partSum += s.HitTp1 ? 0.5m * m : -1m;
+                    grossSum += -1m;
+                }
+            }
+            if (n == 0) return "全市价基线：0 笔";
+            decimal cost = costSum / n;
+            decimal part = partSum / n;
+            return "全市价基线：已结 " + n + " 笔　触及TP1 " + Pct(tp1, n) + "　到达TP2 " + Pct(tp2, n)
+                   + "　全进全出 " + Sign(grossSum / n)
+                   + "　分批 " + Sign(part)
+                   + (cost > 0m ? "　成本 -" + cost.ToString("0.00") + "R　分批净 " + Sign(part - cost) : "");
+        }
 
         private static string AlignText(Align a) => a switch
         {
@@ -1583,6 +1817,17 @@ namespace AtasBridge
                 // grey zone: drawn, but visibly marked as weak.
                 Weak = adr > AdrPass, RrLow = rr < MinRR
             };
+            // ---- 9I: set up the parallel limit path -------------------------
+            // The resting price is derived from the MARKET R, because that is
+            // the only R known at confirmation time. Once (if) it fills, R is
+            // recomputed from the actual fill price, which is smaller - and a
+            // smaller R means cost(R) = 2 x fee x price / R goes UP, partially
+            // eating the maker saving. That trade-off is the whole point of
+            // measuring instead of assuming.
+            decimal off = LimitOffsetR;
+            sig.LimitPrice = isLong ? entry - off * r : entry + off * r;
+            sig.LimitInvalid = isLong ? sig.LimitPrice <= stop : sig.LimitPrice >= stop;
+
             _signals.Add(sig);
             _todayConfirmed++;
             _totalConfirmed++;
@@ -1802,15 +2047,39 @@ namespace AtasBridge
                 var stopCol = dim ? Color.FromArgb(170, 150, 150, 150) : Color.FromArgb(255, 235, 60, 80);
                 var tpCol = dim ? Color.FromArgb(170, 150, 150, 150) : Color.FromArgb(255, 70, 150, 255);
 
-                ctx.DrawLine(new RenderPen(entryCol, 2f), x1, cc.GetYByPrice(s.Entry, false), x2, cc.GetYByPrice(s.Entry, false));
-                ctx.DrawLine(new RenderPen(stopCol, 2f), x1, cc.GetYByPrice(s.Stop, false), x2, cc.GetYByPrice(s.Stop, false));
-                ctx.DrawLine(new RenderPen(tpCol, 1.5f, DashStyle.Dash), x1, cc.GetYByPrice(s.Tp1, false), x2, cc.GetYByPrice(s.Tp1, false));
-                ctx.DrawLine(new RenderPen(tpCol, 2f), x1, cc.GetYByPrice(s.Tp2, false), x2, cc.GetYByPrice(s.Tp2, false));
+                // 9I: in limit mode the entry that matters is the resting price,
+                // not the confirmation close, and an order that never filled is
+                // drawn dashed so it cannot be mistaken for a taken trade.
+                bool limitMode = EntryMode == 1 && !s.LimitInvalid;
+                decimal entryPx = limitMode && s.LimitFilled ? s.LimitEntry : s.Entry;
+                decimal tp1Px = limitMode && s.LimitFilled ? s.LimitTp1 : s.Tp1;
+                bool ghost = limitMode && !s.LimitFilled;    // expired or still resting
+                if (ghost) entryPx = s.LimitPrice;
 
+                var entryPen = ghost
+                    ? new RenderPen(Color.FromArgb(150, entryCol.R, entryCol.G, entryCol.B), 1.5f, DashStyle.Dash)
+                    : new RenderPen(entryCol, 2f);
+                ctx.DrawLine(entryPen, x1, cc.GetYByPrice(entryPx, false), x2, cc.GetYByPrice(entryPx, false));
+                if (!ghost)
+                {
+                    ctx.DrawLine(new RenderPen(stopCol, 2f), x1, cc.GetYByPrice(s.Stop, false), x2, cc.GetYByPrice(s.Stop, false));
+                    ctx.DrawLine(new RenderPen(tpCol, 1.5f, DashStyle.Dash), x1, cc.GetYByPrice(tp1Px, false), x2, cc.GetYByPrice(tp1Px, false));
+                    ctx.DrawLine(new RenderPen(tpCol, 2f), x1, cc.GetYByPrice(s.Tp2, false), x2, cc.GetYByPrice(s.Tp2, false));
+                }
+
+                decimal labR = limitMode && s.LimitFilled ? s.LimitR : s.R;
+                decimal labRr = limitMode && s.LimitFilled ? s.LimitRr : s.Rr;
                 string label = (s.IsLong ? "做多" : "做空") +
-                               " | R=" + s.R.ToString("0.#") +
-                               " | 盈亏比 " + s.Rr.ToString("0.0") +
+                               " | R=" + labR.ToString("0.#") +
+                               " | 盈亏比 " + labRr.ToString("0.0") +
                                " | 仓位 " + s.SizeBtc.ToString("0.000") + " BTC";
+                if (limitMode)
+                {
+                    if (s.LimitFilled) label += " | 限价成交";
+                    else if (s.LimitExpired) label += " | 未成交";
+                    else label += " | 挂单中";
+                }
+                else if (s.LimitInvalid && EntryMode == 1) label += " | 限价无效";
                 if (s.Weak) label += " | 弱信号";
                 if (s.RrLow) label += " | 盈亏比不足";
                 // Outcome, once the market has resolved it. Makes a replay
@@ -1893,6 +2162,15 @@ namespace AtasBridge
                 lines.Add(AlignStatsLine(Align.With));
                 lines.Add(AlignStatsLine(Align.Against));
                 lines.Add(AlignStatsLine(Align.Neutral));
+                // 9I: three books side by side, always computed regardless of
+                // 进场模式 so one chart load compares them directly.
+                lines.Add("进场模式：" + (EntryMode == 1 ? "限价" : "市价")
+                          + "　挂单回撤 " + LimitOffsetR.ToString("0.##") + "R　超时 "
+                          + LimitTimeoutBars + " 根　maker " + MakerPct.ToString("0.###")
+                          + "% / taker " + CostPct.ToString("0.###") + "%");
+                lines.Add(LimitFilledLine());
+                lines.Add(LimitMissedLine());
+                lines.Add(MarketBaselineLine());
             }
 
             int w = 0;

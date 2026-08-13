@@ -69,8 +69,8 @@ namespace AtasBridge
         // 一个程序集里），所以改动任一文件都要更新它，否则设置面板显示的版本会
         // 与 CHANGELOG 对不上 —— -33 只改了 AtasLiquidations.cs 却漏了这里，
         // 就出现过一次。
-        public const string Tag  = "v2026.08.13-6";
-        public const string Desc = "SweepMarker: settings changes now force a recalculation";
+        public const string Tag  = "v2026.08.13-7";
+        public const string Desc = "SweepMarker 9I: limit entry with three parallel accountings";
     }
 
     [DisplayName("AtasBridge")]
