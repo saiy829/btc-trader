@@ -265,6 +265,13 @@ namespace AtasBridge
                  Description = "对面的池太远时目标不现实。若选中的池超过此倍数R，TP2 改用 3R。设 0 表示不限制")]
         public decimal MaxTp2R { get; set; } = 5.0m;
 
+        // Was hardcoded at 1.5 until v2026.08.13-2. Opened up because the
+        // 469-signal sample shows losers reaching 0.8~0.9R on average, so where
+        // TP1 sits decides how much of that is captured.
+        [Display(Name = "TP1倍数(R)", GroupName = "4 交易", Order = 6,
+                 Description = "TP1 距离入场多少个R。样本显示亏损单平均最大浮盈约 0.8~0.9R，把 TP1 放在这个量级附近能让更多亏损单先兑现一部分")]
+        public decimal Tp1Mult { get; set; } = 1.5m;
+
         // Manual account size, used only for the position size label.
         [Display(Name = "账户权益(USD)", GroupName = "4 交易", Order = 5,
                  Description = "手动填入你的真实账户资金，仅用于计算仓位标签")]
@@ -789,6 +796,54 @@ namespace AtasBridge
         private static string Pct(int n, int d) =>
             d <= 0 ? "-" : (n * 100m / d).ToString("0") + "%(" + n + ")";
 
+        // Expectancy under "take half off at TP1, move the rest to breakeven".
+        //
+        // This is NOT a model with guessed inputs - it is exact given what is
+        // already tracked. For a long the stop sits below entry and TP1 above
+        // it, so a trade that touched TP1 and later stopped MUST have travelled
+        // back through the entry price; the remaining half therefore exits at
+        // breakeven, not at -1R. Short is the mirror image.
+        //
+        // Why it matters: over the 469-signal sample 41-43% touch TP1 but only
+        // 26-28% reach TP2, i.e. about 15.6% of all signals touch TP1 and then
+        // stop out. The default all-or-nothing accounting books those as a full
+        // -1R, which understates what the setup is actually worth.
+        private decimal PartialExpectancy(bool isLong, out int n)
+        {
+            decimal tp1r = Tp1Mult > 0m ? Tp1Mult : 1.5m;
+            decimal sum = 0m;
+            n = 0;
+            foreach (var s in _signals)
+            {
+                if (s.IsLong != isLong) continue;
+                if (s.State == Outcome.Tp2)
+                {
+                    sum += 0.5m * tp1r + 0.5m * s.Rr;   // half at TP1, half at TP2
+                    n++;
+                }
+                else if (s.State == Outcome.Stop)
+                {
+                    // touched TP1 first -> half banked, rest out at breakeven
+                    sum += s.HitTp1 ? 0.5m * tp1r : -1m;
+                    n++;
+                }
+            }
+            return n > 0 ? sum / n : 0m;
+        }
+
+        private string PartialExitLine()
+        {
+            decimal el = PartialExpectancy(true, out int nl);
+            decimal es = PartialExpectancy(false, out int ns);
+            int tot = nl + ns;
+            decimal all = tot > 0 ? (el * nl + es * ns) / tot : 0m;
+            return "分批口径(TP1减半仓+移保本)：做多 " + Sign(el) + "　做空 " + Sign(es)
+                   + "　合计 " + Sign(all) + "　（共 " + tot + " 笔，TP1="
+                   + (Tp1Mult > 0m ? Tp1Mult : 1.5m).ToString("0.#") + "R）";
+        }
+
+        private static string Sign(decimal r) => (r >= 0 ? "+" : "") + r.ToString("0.00") + "R";
+
         // Returns null on any out of range / throwing access. Every caller
         // checks for null; that is deliberate, a missing candle must never
         // take the indicator down.
@@ -1197,7 +1252,8 @@ namespace AtasBridge
                 return;
             }
 
-            decimal tp1 = isLong ? entry + 1.5m * r : entry - 1.5m * r;
+            decimal tp1m = Tp1Mult > 0m ? Tp1Mult : 1.5m;
+            decimal tp1 = isLong ? entry + tp1m * r : entry - tp1m * r;
             // "上方最近的摆动高点" is read as "the nearest one that is actually
             // USABLE as a target", i.e. far enough to clear MinRR. Taking the
             // literally nearest pool made most signals grey: 2026-08-12 Sea
@@ -1467,7 +1523,8 @@ namespace AtasBridge
                     DrawRightLabel(ctx, x2, cc.GetYByPrice(s.Stop, false),
                                    "止损 " + s.Stop.ToString("0.#"), stopCol);
                     DrawRightLabel(ctx, x2, cc.GetYByPrice(s.Tp1, false),
-                                   "TP1 " + s.Tp1.ToString("0.#") + " (1.5R)", tpCol);
+                                   "TP1 " + s.Tp1.ToString("0.#") + " ("
+                                   + (Tp1Mult > 0m ? Tp1Mult : 1.5m).ToString("0.#") + "R)", tpCol);
                     DrawRightLabel(ctx, x2, cc.GetYByPrice(s.Tp2, false),
                                    "TP2 " + s.Tp2.ToString("0.#") + " (" + s.Rr.ToString("0.0") + "R)", tpCol);
                 }
@@ -1522,6 +1579,7 @@ namespace AtasBridge
             {
                 lines.Add(StatsLine(true));
                 lines.Add(StatsLine(false));
+                lines.Add(PartialExitLine());
             }
 
             int w = 0;
