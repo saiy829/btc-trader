@@ -357,8 +357,14 @@ namespace AtasBridge
         // int rather than an enum: ATAS shows enum member names verbatim and
         // Chinese identifiers in code would break the "code in English"
         // convention, so the meaning lives in the description instead.
-        [Display(Name = "方向过滤模式(0关闭/1只顺势/2只逆势)", GroupName = "7 高周期过滤", Order = 3,
-                 Description = "0=关闭，全部画出并提示；1=只保留顺势信号；2=只保留逆势信号（对照组，用来验证方向到底有没有用）。⚠ 无论设成几，统计里三组都照常分开计数，所以设 0 加载一次就能同时看到三组表现")]
+        // Mode 3 added 2026-08-13 after the first 9H measurement: on 469 signals
+        // the H1-ranging subset (+0.15R) beat both with-trend (+0.10R) and
+        // counter-trend (-0.08R), and with-trend/counter-trend had IDENTICAL TP2
+        // hit rates (24% both). Setup C is a mean-reversion play, so it works
+        // where price is contained and fails where price trends - "only when the
+        // higher timeframe is ranging" is the filter that actually separates.
+        [Display(Name = "方向过滤模式(0关闭/1只顺势/2只逆势/3只区间)", GroupName = "7 高周期过滤", Order = 3,
+                 Description = "0=关闭，全部画出并提示；1=只保留顺势；2=只保留逆势（对照组）；3=只保留高周期区间中的信号 —— 实测该子集表现最好，因为本 setup 是均值回归型，趋势环境里失效。⚠ 无论设成几，统计里三组都照常分开计数，设 0 加载一次即可同时看到三组表现")]
         public int TrendFilterMode { get; set; } = 0;
 
         [Display(Name = "中性时放行", GroupName = "7 高周期过滤", Order = 4,
@@ -1145,6 +1151,9 @@ namespace AtasBridge
         {
             if (TrendFilterMode == 1) return a == Align.Against || (a == Align.Neutral && !AllowNeutral);
             if (TrendFilterMode == 2) return a == Align.With || (a == Align.Neutral && !AllowNeutral);
+            // Mode 3 keeps only the ranging subset, so AllowNeutral does not
+            // apply here - Neutral IS the thing being selected for.
+            if (TrendFilterMode == 3) return a != Align.Neutral;
             return false;
         }
 
@@ -1833,7 +1842,8 @@ namespace AtasBridge
                 lines.Add(StatsLine(false));
                 lines.Add(PartialExitLine());
                 lines.Add("高周期(" + (HtfMinutes > 0 ? HtfMinutes : 60) + "分钟)结构：" + BiasText(_htfBias)
-                          + "　过滤模式：" + (TrendFilterMode == 1 ? "只顺势" : TrendFilterMode == 2 ? "只逆势" : "关闭")
+                          + "　过滤模式：" + (TrendFilterMode == 1 ? "只顺势" : TrendFilterMode == 2 ? "只逆势"
+                                             : TrendFilterMode == 3 ? "只区间" : "关闭")
                           + "（统计始终三组全计，过滤只影响画线与提示音）");
                 lines.Add(AlignStatsLine(Align.With));
                 lines.Add(AlignStatsLine(Align.Against));
