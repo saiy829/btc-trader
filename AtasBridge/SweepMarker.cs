@@ -4,7 +4,10 @@ using System.ComponentModel;
 using System.ComponentModel.DataAnnotations;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Globalization;
+using System.IO;
 using System.Linq;
+using System.Text;
 
 using ATAS.Indicators;
 using OFT.Rendering.Context;
@@ -334,6 +337,24 @@ namespace AtasBridge
                  Description = "限价成交的单边费率，用于限价组的成本计算。币安 BTCUSDT 永续 maker 约 0.018%，挂单成交几乎无滑点，留余量取 0.023%")]
         public decimal MakerPct { get; set; } = 0.023m;
 
+        // ================= settings: per trade export (card 9J) ========
+        // Cards 9G/9H/9I were each decided on eight aggregate numbers read off
+        // a panel screenshot. Every field written below already existed in
+        // memory the whole time; none of it was ever persisted, so no
+        // distribution could be inspected and no label could be checked against
+        // the chart. LOG_MAX caps the ATAS log window at 40 lines, which is why
+        // this writes a file rather than logging.
+
+        [Display(Name = "导出逐笔CSV", GroupName = "9 导出", Order = 1,
+                 Description = "勾选后，历史计算走完时把每一笔确认信号写成一行CSV（含结局、最大浮盈浮亏、方向标签及其判定依据）。切换本项会强制重算并重新导出。仅在需要离线分析时打开")]
+        public bool ExportCsv { get => _exportCsv; set => SetCalc(ref _exportCsv, value); }
+        private bool _exportCsv = false;
+
+        [Display(Name = "CSV路径", GroupName = "9 导出", Order = 2,
+                 Description = "导出文件的完整路径。每次重算整体覆盖，不追加。父目录不存在会自动创建")]
+        public string CsvPath { get => _csvPath; set => SetCalc(ref _csvPath, value); }
+        private string _csvPath = @"C:\AtasBridge\sweep_trades.csv";
+
         // Manual account size, used only for the position size label.
         [Display(Name = "账户权益(USD)", GroupName = "4 交易", Order = 5,
                  Description = "手动填入你的真实账户资金，仅用于计算仓位标签")]
@@ -510,6 +531,19 @@ namespace AtasBridge
             public decimal High, Low, Close;
         }
 
+        // 9J: swing points now carry the timestamp of the bar they formed on.
+        // RecomputeBias() still compares prices only, so the bias arithmetic is
+        // exactly what 9H measured. The timestamp exists purely so the label can
+        // be AUDITED: the two lists are appended independently, so nothing
+        // currently guarantees that the four points the bias is built from form
+        // a coherent alternating sequence. Without times that cannot be checked,
+        // which is the question this card exists to answer.
+        private sealed class Swing
+        {
+            public decimal Price;
+            public DateTime Time;
+        }
+
         private sealed class Signal
         {
             public int Bar;
@@ -545,6 +579,16 @@ namespace AtasBridge
             public decimal LimitEntry, LimitR, LimitTp1, LimitRr;
             public Outcome LimitState = Outcome.Open;
             public bool LimitHitTp1;
+
+            // --- 9J: audit trail for the direction label ---------------------
+            // Snapshot of the exact four swing points RecomputeBias() compared
+            // at the moment this signal fired, plus their timestamps. Recorded
+            // per signal rather than read back later because the lists are
+            // rolling (capped at 8) and are long gone by the time a dump runs.
+            public DateTime Time;
+            public Bias HtfBias = Bias.Neutral;
+            public decimal SwH1, SwH0, SwL1, SwL0;
+            public DateTime SwH1T, SwH0T, SwL1T, SwL0T;
         }
 
         private sealed class InvalidMark
@@ -577,10 +621,14 @@ namespace AtasBridge
         private readonly List<HtfBar> _htf = new();     // CLOSED htf candles only
         private HtfBar? _htfCur;                        // the one still forming
         private long _htfBucket = long.MinValue;
-        private readonly List<decimal> _htfSwingHigh = new();   // chronological
-        private readonly List<decimal> _htfSwingLow = new();
+        private readonly List<Swing> _htfSwingHigh = new();   // chronological
+        private readonly List<Swing> _htfSwingLow = new();
         private int _htfPivotScanned = -1;
         private Bias _htfBias = Bias.Neutral;
+
+        // ---- 9J export state ----
+        private bool _csvDumped;        // one write per calculation pass
+        private string _csvNote = "";   // surfaced on the panel so a silent failure cannot pass for success
         private DateTime _curDay = DateTime.MinValue;
         private decimal _dayHigh, _dayLow, _prevDayClose, _curDayClose;
 
@@ -707,6 +755,10 @@ namespace AtasBridge
             _soundsAllowed = false;
             _soundLogCount = 0;
             _totalConfirmed = _totalInvalidated = 0;
+            // 9J: a recalculation replays the whole history, so the dump must be
+            // re-armed - unlike the sound gate below, which must NOT be.
+            _csvDumped = false;
+            _csvNote = "";
             // _maxBarProcessed / _firstPassDone are intentionally preserved.
         }
 
@@ -782,7 +834,14 @@ namespace AtasBridge
 
                 StageOne(bar);
 
-                if (bar >= CurrentBar) _firstPassDone = true;
+                if (bar >= CurrentBar)
+                {
+                    _firstPassDone = true;
+                    // 9J: dump here and not in OnRender - this is the first
+                    // point at which every signal that CAN resolve already has,
+                    // and it fires exactly once per pass.
+                    if (ExportCsv && !_csvDumped) { _csvDumped = true; DumpCsv(); }
+                }
             }
             catch (Exception ex)
             {
@@ -963,6 +1022,102 @@ namespace AtasBridge
                 }
             }
         }
+
+        // ================= 9J: per trade CSV ==========================
+        // Written once per calculation pass, at the point where every
+        // resolvable signal has already been resolved. Overwrites rather than
+        // appends: a recalculation replays the same history, so appending would
+        // just duplicate rows.
+        private void DumpCsv()
+        {
+            string path = (CsvPath ?? "").Trim();
+            if (path.Length == 0) { _csvNote = "CSV路径为空"; return; }
+            try
+            {
+                var dir = Path.GetDirectoryName(path);
+                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                    Directory.CreateDirectory(dir);
+
+                var sb = new StringBuilder(160 * (_signals.Count + 2));
+                sb.Append("idx,bar,time,dir,entry,stop,tp1,tp2,r,r_pct,rr,adr,weak,rr_low,pool_id,")
+                  .Append("state,hit_tp1,resolved_bar,bars_held,mfe_r,mae_r,align,filtered,")
+                  .Append("htf_bias,sw_h1,sw_h1_time,sw_h0,sw_h0_time,sw_l1,sw_l1_time,sw_l0,sw_l0_time,")
+                  .Append("limit_price,limit_invalid,limit_filled,limit_expired,limit_fill_bar,")
+                  .Append("limit_entry,limit_r,limit_rr,limit_state,limit_hit_tp1\n");
+
+                int i = 0;
+                foreach (var s in _signals)
+                {
+                    i++;
+                    // R as a percentage of entry is what the cost identity needs
+                    // (cost(R) = 2 x fee% / stop%); deriving it downstream from
+                    // two rounded columns would lose precision.
+                    decimal rPct = s.Entry != 0m ? s.R / s.Entry * 100m : 0m;
+                    sb.Append(i).Append(',').Append(s.Bar).Append(',').Append(T(s.Time)).Append(',')
+                      .Append(s.IsLong ? "long" : "short").Append(',')
+                      .Append(N(s.Entry, 1)).Append(',').Append(N(s.Stop, 1)).Append(',')
+                      .Append(N(s.Tp1, 1)).Append(',').Append(N(s.Tp2, 1)).Append(',')
+                      .Append(N(s.R, 2)).Append(',').Append(N(rPct, 4)).Append(',')
+                      .Append(N(s.Rr, 3)).Append(',').Append(N(s.Adr, 3)).Append(',')
+                      .Append(B(s.Weak)).Append(',').Append(B(s.RrLow)).Append(',')
+                      .Append(s.PoolId).Append(',')
+                      .Append(StateText(s.State)).Append(',').Append(B(s.HitTp1)).Append(',')
+                      .Append(s.ResolvedBar).Append(',')
+                      .Append(s.ResolvedBar >= 0 ? (s.ResolvedBar - s.Bar) : -1).Append(',')
+                      .Append(N(s.MaxFavR, 3)).Append(',').Append(N(s.MaxAdvR, 3)).Append(',')
+                      .Append(AlignRaw(s.Align)).Append(',').Append(B(s.Filtered)).Append(',')
+                      .Append(BiasRaw(s.HtfBias)).Append(',')
+                      .Append(N(s.SwH1, 1)).Append(',').Append(T(s.SwH1T)).Append(',')
+                      .Append(N(s.SwH0, 1)).Append(',').Append(T(s.SwH0T)).Append(',')
+                      .Append(N(s.SwL1, 1)).Append(',').Append(T(s.SwL1T)).Append(',')
+                      .Append(N(s.SwL0, 1)).Append(',').Append(T(s.SwL0T)).Append(',')
+                      .Append(N(s.LimitPrice, 1)).Append(',').Append(B(s.LimitInvalid)).Append(',')
+                      .Append(B(s.LimitFilled)).Append(',').Append(B(s.LimitExpired)).Append(',')
+                      .Append(s.LimitFillBar).Append(',')
+                      .Append(N(s.LimitEntry, 1)).Append(',').Append(N(s.LimitR, 2)).Append(',')
+                      .Append(N(s.LimitRr, 3)).Append(',')
+                      .Append(StateText(s.LimitState)).Append(',').Append(B(s.LimitHitTp1))
+                      .Append('\n');
+                }
+
+                File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+                _csvNote = "已导出 " + _signals.Count + " 行 -> " + path;
+            }
+            catch (Exception ex)
+            {
+                _csvNote = "导出失败: " + ex.GetType().Name + ": " + ex.Message;
+                LogEx("DumpCsv", ex);
+            }
+        }
+
+        // Invariant culture throughout: on a locale that uses a comma as the
+        // decimal separator, plain ToString() would silently shred the CSV.
+        private static string N(decimal v, int dp)
+            => v.ToString("F" + dp.ToString(CultureInfo.InvariantCulture), CultureInfo.InvariantCulture);
+        private static string B(bool v) => v ? "1" : "0";
+        private static string T(DateTime t)
+            => t == DateTime.MinValue ? "" : t.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
+        private static string StateText(Outcome o) => o switch
+        {
+            Outcome.Tp2 => "tp2",
+            Outcome.Tp1 => "tp1_open",
+            Outcome.Stop => "stop",
+            _ => "open"
+        };
+        // ASCII in the file, Chinese only on the panel: keeps the CSV readable
+        // by any tool regardless of encoding guesswork.
+        private static string AlignRaw(Align a) => a switch
+        {
+            Align.With => "with",
+            Align.Against => "against",
+            _ => "neutral"
+        };
+        private static string BiasRaw(Bias b) => b switch
+        {
+            Bias.Bull => "bull",
+            Bias.Bear => "bear",
+            _ => "neutral"
+        };
 
         // One line per resolved signal so a replay can be analysed offline
         // instead of squinting at the chart.
@@ -1389,12 +1544,12 @@ namespace AtasBridge
             }
             if (isHigh)
             {
-                _htfSwingHigh.Add(c.High);
+                _htfSwingHigh.Add(new Swing { Price = c.High, Time = c.Time });
                 if (_htfSwingHigh.Count > 8) _htfSwingHigh.RemoveAt(0);
             }
             if (isLow)
             {
-                _htfSwingLow.Add(c.Low);
+                _htfSwingLow.Add(new Swing { Price = c.Low, Time = c.Time });
                 if (_htfSwingLow.Count > 8) _htfSwingLow.RemoveAt(0);
             }
             RecomputeBias();
@@ -1410,11 +1565,40 @@ namespace AtasBridge
                 _htfBias = Bias.Neutral;
                 return;
             }
-            decimal h1 = _htfSwingHigh[^1], h0 = _htfSwingHigh[^2];
-            decimal l1 = _htfSwingLow[^1], l0 = _htfSwingLow[^2];
+            decimal h1 = _htfSwingHigh[^1].Price, h0 = _htfSwingHigh[^2].Price;
+            decimal l1 = _htfSwingLow[^1].Price, l0 = _htfSwingLow[^2].Price;
             if (h1 > h0 && l1 > l0) _htfBias = Bias.Bull;
             else if (h1 < h0 && l1 < l0) _htfBias = Bias.Bear;
             else _htfBias = Bias.Neutral;
+        }
+
+        // Records the exact inputs RecomputeBias() used for this signal, so the
+        // label can later be checked against the chart instead of trusted.
+        private void SnapshotHtf(Signal s, int bar)
+        {
+            try
+            {
+                s.Time = BarTime(bar);
+                s.HtfBias = _htfBias;
+                if (_htfSwingHigh.Count >= 2)
+                {
+                    s.SwH1 = _htfSwingHigh[^1].Price; s.SwH1T = _htfSwingHigh[^1].Time;
+                    s.SwH0 = _htfSwingHigh[^2].Price; s.SwH0T = _htfSwingHigh[^2].Time;
+                }
+                if (_htfSwingLow.Count >= 2)
+                {
+                    s.SwL1 = _htfSwingLow[^1].Price; s.SwL1T = _htfSwingLow[^1].Time;
+                    s.SwL0 = _htfSwingLow[^2].Price; s.SwL0T = _htfSwingLow[^2].Time;
+                }
+            }
+            catch (Exception ex) { LogEx("SnapshotHtf", ex); }
+        }
+
+        // Chart-local time, so a CSV row can be found on the axis by eye.
+        private DateTime BarTime(int bar)
+        {
+            try { return GetCandle(bar).Time.AddHours(InstrumentInfo?.TimeZone ?? 0); }
+            catch (Exception ex) { LogEx("BarTime", ex); return DateTime.MinValue; }
         }
 
         private Align AlignOf(bool isLong)
@@ -1828,6 +2012,12 @@ namespace AtasBridge
             sig.LimitPrice = isLong ? entry - off * r : entry + off * r;
             sig.LimitInvalid = isLong ? sig.LimitPrice <= stop : sig.LimitPrice >= stop;
 
+            // ---- 9J: freeze the label's own inputs --------------------------
+            // The swing lists roll (capped at 8), so by the time a dump runs the
+            // points this signal was judged against are long gone. Snapshot now
+            // or the audit is impossible.
+            SnapshotHtf(sig, bar);
+
             _signals.Add(sig);
             _todayConfirmed++;
             _totalConfirmed++;
@@ -2171,6 +2361,10 @@ namespace AtasBridge
                 lines.Add(LimitFilledLine());
                 lines.Add(LimitMissedLine());
                 lines.Add(MarketBaselineLine());
+                // 9J: a write that failed silently would look exactly like one
+                // that never ran, and the analysis downstream would then be run
+                // against a stale file. Say so on the panel.
+                if (ExportCsv) lines.Add("逐笔导出：" + (_csvNote.Length > 0 ? _csvNote : "等待历史计算完成…"));
             }
 
             int w = 0;

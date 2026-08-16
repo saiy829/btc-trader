@@ -2317,3 +2317,23 @@ maker费率(%)=0.023；原「单边成本(%)」移入本组并更名为「taker�
 ### 部署
 
 双平台 0 错误，各 137728 字节。设置项与三组面板字符串均已校验存在。
+
+## v2026.08.16-1 (card 9J)
+
+SweepMarker: 新增逐笔 CSV 导出（设置组「9 导出」），用于离线分析与 9H 方向标签验证。
+
+- 新增 `Swing { Price, Time }`，`_htfSwingHigh/_htfSwingLow` 改为携带时间戳。
+  `RecomputeBias()` 仍只比较价格，**信号逻辑零改动**；时间戳纯粹用于审计。
+- `Signal` 新增快照字段：`Time / HtfBias / SwH1,SwH0,SwL1,SwL0 / SwH1T..SwL0T`。
+  在确认瞬间由 `SnapshotHtf()` 冻结 —— 摆动点列表上限 8 条会滚动挤掉，
+  事后回读拿不到当时的判定依据。
+- `DumpCsv()`：42 列 / 每笔确认信号一行，`bar >= CurrentBar` 首次成立时写入
+  （此时所有能结算的信号都已结算），整体覆盖不追加。
+- 全部数值走 `CultureInfo.InvariantCulture`；CSV 内容全 ASCII
+  （`with/against/neutral`、`tp2/stop/open`），中文只留在面板。
+- `_csvDumped` 在 `ResetAll()` 中重置（与声音闸门 `_firstPassDone` 相反，
+  那个必须跨重算保留）。
+- 面板新增「逐笔导出：…」行显示行数或异常 —— 静默失败会让下游拿旧文件做分析。
+
+背景：9G/9H/9I 三张卡的结论都建立在面板 8 个汇总数字上。逐笔档案一直在内存里，
+从未导出，导致分布看不了、标签核对不了、样本外切分做不了。
